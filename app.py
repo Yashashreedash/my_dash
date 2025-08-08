@@ -1,6 +1,5 @@
 import pandas as pd
 import plotly.graph_objs as go
-!pip install dash
 from dash import Dash, dcc, html, Input, Output
 
 # === Load Forecast Data ===
@@ -116,3 +115,4 @@ def update_forecast(variable, scenario):
 # === Run App ===
 if __name__ == '__main__':
     app.run(debug=True)
+
