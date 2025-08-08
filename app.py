@@ -4,7 +4,7 @@ from dash import Dash, dcc, html, Input, Output
 
 # === Load Forecast Data ===
 # Use the actual sheets from your Excel file
-file_path = "C:/Users/user/Yashashree_PC/STFECP/Database_final.xlsx"
+file_path = "Database_final.xlsx"
 
 # Define variables and thresholds
 variables = {
@@ -114,5 +114,6 @@ def update_forecast(variable, scenario):
 
 # === Run App ===
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run_server(debug=False, host='0.0.0.0', port=8080)
+
 
