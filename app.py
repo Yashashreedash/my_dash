@@ -1,5 +1,6 @@
 # app.py — Macros, Micros, Simulation (all macros shown)
 # Adjusted Forecast is ONLY drawn from the forecast start onward (not in history)
+# Render-ready: uses Dash (Gunicorn will import `server`)
 
 import os
 import re
@@ -17,12 +18,13 @@ from dash import Dash, dcc, html, Input, Output
 # ====== CONFIG ===========
 # =========================
 
-# --- Portable path discovery for the Excel file ---
+# --- Portable path discovery for the Excel file (Render-safe) ---
 HERE = Path(__file__).resolve().parent
+
 CANDIDATES = [
     HERE / "Scenario_Forecasts_NEW.xlsx",
     HERE / "data" / "Scenario_Forecasts_NEW.xlsx",
-    Path(os.environ.get("SCENARIO_XLSX", "")),
+    Path(os.environ.get("SCENARIO_XLSX", "")),  # allow override via env var
 ]
 FILE_PATH = next((p for p in CANDIDATES if p and p.is_file()), None)
 
@@ -316,6 +318,24 @@ def add_crisis_bands(fig: go.Figure, df: pd.DataFrame, row=None, col=None):
                 fig.add_vrect(x0=start, x1=end, fillcolor="lightgrey", opacity=0.2, line_width=0)
             on = False
 
+# --------- Global historical crisis shading (all graphs) ----------
+CRISIS_PERIODS = [
+    # 2008–09 Financial Crisis: red
+    {"x0": "2008-01-01", "x1": "2009-12-31", "fillcolor": "rgba(255,0,0,0.18)"},
+    # 2020 COVID: purple
+    {"x0": "2020-03-01", "x1": "2021-03-31", "fillcolor": "rgba(128,0,128,0.18)"},
+    # 2022–23 Recession: orange
+    {"x0": "2022-01-01", "x1": "2023-12-31", "fillcolor": "rgba(255,165,0,0.18)"},
+]
+
+def add_global_crisis_bands(fig: go.Figure, row=None, col=None):
+    """Add fixed historical shaded bands to any figure (or subplot via row/col)."""
+    for p in CRISIS_PERIODS:
+        if row is not None and col is not None:
+            fig.add_vrect(x0=p["x0"], x1=p["x1"], fillcolor=p["fillcolor"], opacity=0.25, line_width=0, row=row, col=col)
+        else:
+            fig.add_vrect(x0=p["x0"], x1=p["x1"], fillcolor=p["fillcolor"], opacity=0.25, line_width=0)
+
 def add_ci_band(fig: go.Figure, df: pd.DataFrame, norm_on: bool, row=None, col=None):
     if {"Upper CI", "Lower CI"}.issubset(df.columns):
         up, lo = df["Upper CI"], df["Lower CI"]
@@ -513,7 +533,7 @@ scenario_opts_global = [{"label": s, "value": s} for s in (avail_scn_all or ["Ba
 # =========================
 
 app = Dash(__name__, suppress_callback_exceptions=True)
-server = app.server  # <-- important for gunicorn
+server = app.server  # <-- important for Gunicorn on Render
 
 def pct_slider(id_, label):
     return html.Div([
@@ -658,7 +678,11 @@ def cb_macro(var, scn, norm_on):
                                  line=dict(dash="dash", width=2), name=f"Forecast · {use_scn}"))
         add_ci_band(fig, df, norm_on)
 
-    add_hist_forecast_divider(fig, df); add_crisis_bands(fig, df)
+    add_hist_forecast_divider(fig, df)
+    add_crisis_bands(fig, df)
+    # Global historical crisis shading
+    add_global_crisis_bands(fig)
+
     fig.update_xaxes(type="date"); fig.update_layout(title=f"{var} · {use_scn}", xaxis_title="Quarter", hovermode="x unified")
 
     warn = fallback_note
@@ -703,7 +727,11 @@ def cb_micro(var, scn, norm_on):
                                  line=dict(dash="dash", width=2), name=f"Forecast · {use_scn}"))
         add_ci_band(fig, df, norm_on)
 
-    add_hist_forecast_divider(fig, df); add_crisis_bands(fig, df)
+    add_hist_forecast_divider(fig, df)
+    add_crisis_bands(fig, df)
+    # Global historical crisis shading
+    add_global_crisis_bands(fig)
+
     fig.update_xaxes(type="date"); fig.update_layout(title=f"{var} · {use_scn}", xaxis_title="Quarter", hovermode="x unified")
     return fig, model_badge_text(var), relationship_table(var)
 
@@ -794,6 +822,8 @@ def cb_sim(micro_var, scn, norm_on, p_ccg, p_cpih, p_unemp, p_gdp, p_yield):
 
         add_hist_forecast_divider(macro_fig, dfm_base, row=i, col=1)
         add_crisis_bands(macro_fig, dfm_base, row=i, col=1)
+        # Global historical crisis shading per subplot
+        add_global_crisis_bands(macro_fig, row=i, col=1)
 
     macro_fig.update_xaxes(type="date")
     macro_fig.update_layout(title=f"All Macros · Simulation ({scn_use})", hovermode="x unified", height=220 * rows_n)
@@ -836,6 +866,9 @@ def cb_sim(micro_var, scn, norm_on, p_ccg, p_cpih, p_unemp, p_gdp, p_yield):
 
         add_hist_forecast_divider(micro_fig, df_micro_base)
         add_crisis_bands(micro_fig, df_micro_base)
+        # Global historical crisis shading
+        add_global_crisis_bands(micro_fig)
+
         micro_fig.update_xaxes(type="date")
         micro_fig.update_layout(title=f"{micro_var} · Simulation impact", xaxis_title="Quarter", hovermode="x unified")
 
@@ -849,7 +882,7 @@ def cb_sim(micro_var, scn, norm_on, p_ccg, p_cpih, p_unemp, p_gdp, p_yield):
     return rd, macro_fig, micro_fig
 
 # =========================
-# ====== MAIN =============
+# ====== MAIN (Render) ====
 # =========================
 
 if __name__ == "__main__":
