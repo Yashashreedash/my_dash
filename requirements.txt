@@ -1,5 +1,7 @@
 dash
-pandas
 plotly
+pandas
+numpy
 openpyxl
 gunicorn
+
