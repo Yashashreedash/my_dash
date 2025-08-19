@@ -1,8 +1,11 @@
 # app.py — Macros, Micros, Simulation (all macros shown)
 # Adjusted Forecast is ONLY drawn from the forecast start onward (not in history)
 
+import os
 import re
+from pathlib import Path
 from typing import Dict, List, Tuple
+
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_period_dtype, is_datetime64_any_dtype
@@ -10,10 +13,18 @@ import plotly.graph_objs as go
 from plotly.subplots import make_subplots
 from dash import Dash, dcc, html, Input, Output
 
+# =========================
+# ====== CONFIG ===========
+# =========================
 
-
-FILE_PATH = "C:/Users/user/Yashashree_PC/STFECP/Scenario_Forecasts_NEW.xlsx"  # <-- update if needed
-# FILE_PATH = "/mnt/data/Scenario_Forecasts_NEW.xlsx"  # alt path for hosted env
+# --- Portable path discovery for the Excel file ---
+HERE = Path(__file__).resolve().parent
+CANDIDATES = [
+    HERE / "Scenario_Forecasts_NEW.xlsx",
+    HERE / "data" / "Scenario_Forecasts_NEW.xlsx",
+    Path(os.environ.get("SCENARIO_XLSX", "")),
+]
+FILE_PATH = next((p for p in CANDIDATES if p and p.is_file()), None)
 
 # Map workbook sheet names -> friendly names for UI
 SHEET_TO_NAME = {
@@ -107,15 +118,16 @@ def detect_time_col(df: pd.DataFrame) -> str:
     raise ValueError("No time column found (expect: Date/Quarter/Unnamed: 0).")
 
 def find_forecast_scenarios(df: pd.DataFrame) -> List[Tuple[str, str]]:
+    """Match Forecast_* columns → list of (scenario_token, column_name)."""
     pairs = []
     for col in df.columns:
-        m = re.match(r'(?i)forecast[_\s]*(.+)$', str(col))
+        m = re.match(r'(?i)^forecast[_\s]*(.+)$', str(col).strip())
         if m:
-            scn = m.group(1).strip()
-            pairs.append((scn, col))
+            pairs.append((m.group(1).strip(), col))
     return pairs
 
 def find_ci_cols(df: pd.DataFrame, scenario: str) -> Tuple[str, str]:
+    """Find Lower/Upper CI columns for a given scenario (flexible matching)."""
     lower, upper = None, None
     sl = scenario.lower()
     scen_tokens = {sl, sl.replace(" ", "_"), sl.replace("_", " "), sl.title(), sl.capitalize()}
@@ -183,7 +195,11 @@ def read_all_sheets(file_path: str) -> Dict[str, pd.DataFrame]:
     """
     xls = pd.ExcelFile(file_path)
     out = {}
-    CANON_SCN = {"baseline": "Baseline", "recession": "Recession", "recovery": "Recovery", "crisis": "Crisis"}
+
+    CANON_SCN = {
+        "baseline": "Baseline", "recession": "Recession",
+        "recovery": "Recovery", "crisis": "Crisis"
+    }
 
     for sheet in xls.sheet_names:
         if sheet not in SHEET_TO_NAME:
@@ -198,7 +214,7 @@ def read_all_sheets(file_path: str) -> Dict[str, pd.DataFrame]:
         df["Quarter"] = pd.to_datetime(df["Quarter"], errors="coerce")
 
         # scenarios
-        scn_pairs = find_forecast_scenarios(df)
+        scn_pairs = find_forecast_scenarios(df)  # [(ScenarioToken, Forecast_Column)]
         crisis_cols = [c for c in df.columns if str(c).startswith("Crisis_")]
         actual_exists = "Actual" in df.columns
 
@@ -218,6 +234,7 @@ def read_all_sheets(file_path: str) -> Dict[str, pd.DataFrame]:
 
                 frames.append(tmp)
         else:
+            # fallback single Forecast
             if "Forecast" not in df.columns:
                 continue
             tmp = df[["Quarter", "Forecast"] + (["Actual"] if actual_exists else []) + crisis_cols].copy()
@@ -472,21 +489,31 @@ def scenario_identical_note(var: str, scn: str, data: Dict[str, pd.DataFrame]) -
         return f"(Note: For {var}, '{scn}' is identical to 'Baseline' in the source file.)"
     return ""
 
+# =========================
+# ====== LOAD DATA ========
+# =========================
 
+if FILE_PATH is None:
+    DATA = {}
+    LOAD_ERROR = "Dataset not found. Place 'Scenario_Forecasts_NEW.xlsx' in the project root, a 'data/' folder, or set SCENARIO_XLSX."
+else:
+    DATA = read_all_sheets(str(FILE_PATH))
+    LOAD_ERROR = ""
 
-DATA = read_all_sheets(FILE_PATH)
 VAR_SCENARIOS = tidy_var_scenarios(DATA)
 
 macro_opts = [{"label": m, "value": m} for m in MACROS if m in DATA]
 micro_opts = [{"label": m, "value": m} for m in MICROS if m in DATA]
 
-avail_scn_all = sorted(set(sum([DATA[k]["Scenario"].dropna().unique().tolist() for k in DATA], [])))
-scenario_opts_global = [{"label": s, "value": s} for s in avail_scn_all] or [{"label": "Baseline", "value": "Baseline"}]
+avail_scn_all = sorted(set(sum([DATA[k]["Scenario"].dropna().unique().tolist() for k in DATA], []))) if DATA else []
+scenario_opts_global = [{"label": s, "value": s} for s in (avail_scn_all or ["Baseline"])]
 
-
+# =========================
+# ====== DASH UI ==========
+# =========================
 
 app = Dash(__name__, suppress_callback_exceptions=True)
-app.title = "Economic Forecasts"
+server = app.server  # <-- important for gunicorn
 
 def pct_slider(id_, label):
     return html.Div([
@@ -495,8 +522,14 @@ def pct_slider(id_, label):
                    marks={-50: "-50", -25: "-25", 0: "0", 25: "25", 50: "+50"})
     ], style={"minWidth": "220px", "flex": "1 1 260px"})
 
+top_banner = html.Div(
+    LOAD_ERROR,
+    style={"background":"#ffecec","border":"1px solid #ffb3b3","padding":"8px 12px","borderRadius":"8px","color":"#b30000","marginBottom":"10px"}
+) if LOAD_ERROR else None
+
 app.layout = html.Div([
     html.H2("📊 Economic Forecasts"),
+    *( [top_banner] if top_banner else [] ),
 
     dcc.Checklist(id="normalize-toggle", options=[{"label":" Normalize to index = 100", "value":"norm"}],
                   value=["norm"], style={"marginBottom":"6px"}),
@@ -571,7 +604,9 @@ app.layout = html.Div([
     ])
 ])
 
-
+# =========================
+# ====== CALLBACKS ========
+# =========================
 
 @app.callback(Output("normalize-flag","data"), Input("normalize-toggle","value"))
 def set_norm(value):
@@ -579,12 +614,12 @@ def set_norm(value):
 
 @app.callback(Output("macro-scn","options"), Output("macro-scn","value"), Input("macro-var","value"))
 def sync_macro_scn(var):
-    scns = VAR_SCENARIOS.get(var, []) or avail_scn_all or ["Baseline"]
+    scns = (VAR_SCENARIOS.get(var, []) if var else []) or avail_scn_all or ["Baseline"]
     return [{"label": s, "value": s} for s in scns], scns[0]
 
 @app.callback(Output("micro-scn","options"), Output("micro-scn","value"), Input("micro-var","value"))
 def sync_micro_scn(var):
-    scns = VAR_SCENARIOS.get(var, []) or avail_scn_all or ["Baseline"]
+    scns = (VAR_SCENARIOS.get(var, []) if var else []) or avail_scn_all or ["Baseline"]
     return [{"label": s, "value": s} for s in scns], scns[0]
 
 @app.callback(Output("sim-scn","options"), Output("sim-scn","value"), Input("sim-micro-var","value"))
@@ -592,7 +627,7 @@ def sync_sim_scn(micro_var):
     macro_sets = [set(VAR_SCENARIOS.get(m, [])) for m in MACROS if m in VAR_SCENARIOS]
     sets = macro_sets + ([set(VAR_SCENARIOS.get(micro_var, []))] if micro_var in VAR_SCENARIOS else [])
     inter = set.intersection(*sets) if sets else set()
-    scns = sorted(inter) or (VAR_SCENARIOS.get(micro_var, []) or avail_scn_all or ["Baseline"])
+    scns = sorted(inter) or (VAR_SCENARIOS.get(micro_var, []) if micro_var in VAR_SCENARIOS else avail_scn_all) or ["Baseline"]
     return [{"label": s, "value": s} for s in scns], scns[0]
 
 # Macro tab
@@ -606,7 +641,7 @@ def sync_sim_scn(micro_var):
     Input("normalize-flag","data")
 )
 def cb_macro(var, scn, norm_on):
-    if not var: return go.Figure(), "", "", ""
+    if not var or var not in DATA: return go.Figure(), "", "", ""
     df_all = DATA[var]
     use_scn = scn if scenario_exists_for_var(var, scn, VAR_SCENARIOS) else (VAR_SCENARIOS.get(var, ["Baseline"])[0])
     fallback_note = "" if use_scn == scn else f"(Using {use_scn}; '{scn}' not available for {var}.) "
@@ -652,7 +687,7 @@ def cb_macro(var, scn, norm_on):
     Input("normalize-flag","data")
 )
 def cb_micro(var, scn, norm_on):
-    if not var: return go.Figure(), "", ""
+    if not var or var not in DATA: return go.Figure(), "", ""
     df_all = DATA[var]
     use_scn = scn if scenario_exists_for_var(var, scn, VAR_SCENARIOS) else (VAR_SCENARIOS.get(var, ["Baseline"])[0])
     df = df_all[df_all["Scenario"] == use_scn].copy().sort_values("Quarter")
@@ -687,7 +722,7 @@ def cb_micro(var, scn, norm_on):
     Input("pct-yield","value"),
 )
 def cb_sim(micro_var, scn, norm_on, p_ccg, p_cpih, p_unemp, p_gdp, p_yield):
-    if not micro_var or not scn:
+    if not micro_var or not scn or not DATA:
         return "", go.Figure(), go.Figure()
 
     present_macros = [m for m in MACROS if m in DATA]
@@ -742,7 +777,6 @@ def cb_sim(micro_var, scn, norm_on, p_ccg, p_cpih, p_unemp, p_gdp, p_yield):
                 fdate = dfm_base.loc[fidx, "Quarter"]
                 adj_mask = dfm_adj["Quarter"] >= fdate
 
-                # yAdj aligned to dfm_adj rows, then masked
                 yAdj_full = to_index_100_relative(adjF, common_base) if norm_on else adjF
                 yAdj_ser = pd.Series(yAdj_full, index=dfm_adj.index)
                 x_adj = dfm_adj.loc[adj_mask, "Quarter"]
@@ -814,7 +848,10 @@ def cb_sim(micro_var, scn, norm_on, p_ccg, p_cpih, p_unemp, p_gdp, p_yield):
 
     return rd, macro_fig, micro_fig
 
-
+# =========================
+# ====== MAIN =============
+# =========================
 
 if __name__ == "__main__":
-    app.run(debug=True, use_reloader=False, port=8056)  # avoid 8050 "already in use"
+    # Render provides $PORT; default to 8050 locally
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8050)), debug=False, use_reloader=False)
