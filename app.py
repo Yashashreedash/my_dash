@@ -1,42 +1,50 @@
-# app.py — Macros, Micros, Simulation (all macros shown)
-# Adjusted Forecast is ONLY drawn from the forecast start onward (not in history)
-# Render-ready: uses Dash (Gunicorn will import `server`)
+# app.py
+# UK ECONOMIC CRISIS SIMULATOR — Normalise removed (always OFF)
+# Run: python app.py  → open http://127.0.0.1:8050
 
-import os
-import re
+import os, re
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_period_dtype, is_datetime64_any_dtype
+
 import plotly.graph_objs as go
 from plotly.subplots import make_subplots
-from dash import Dash, dcc, html, Input, Output
+
+from dash import Dash, dcc, html, Input, Output, State, callback_context
+import dash
+try:
+    import dash_bootstrap_components as dbc
+    USE_DBC = True
+except Exception:
+    USE_DBC = False
+
+try:
+    from dash import dash_table
+except Exception:
+    import dash_table
 
 # =========================
 # ====== CONFIG ===========
 # =========================
 
-# --- Portable path discovery for the Excel file (Render-safe) ---
-HERE = Path(__file__).resolve().parent
-
+HERE = Path.cwd()
 CANDIDATES = [
     HERE / "Scenario_Forecasts_NEW.xlsx",
     HERE / "data" / "Scenario_Forecasts_NEW.xlsx",
-    Path(os.environ.get("SCENARIO_XLSX", "")),  # allow override via env var
+    Path("C:/Users/user/Yashashree_PC/STFECP/Scenario_Forecasts_NEW.xlsx"),
+    Path(os.environ.get("SCENARIO_XLSX", "")),
 ]
 FILE_PATH = next((p for p in CANDIDATES if p and p.is_file()), None)
 
-# Map workbook sheet names -> friendly names for UI
 SHEET_TO_NAME = {
-    # Macros
     "Credit_Card_Growth": "Credit Card Growth",
     "Unemployment_rate_aged_16_and_o": "Unemployment",
     "CPIH_ANNUAL_RATE_00_ALL_ITEMS_2": "CPIH",
     "Gross_Domestic_Product_Quarter_": "GDP",
     "10Y_2Y_Spread": "Yield Spread",
-    # Micros (RSI)
     "RSI_Predominantly_food_stores": "RSI: Predominantly food stores",
     "RSI_clothing_footwear": "RSI: Clothing & Footwear",
     "RSI_Household_goods_stores": "RSI: Household goods",
@@ -47,24 +55,12 @@ SHEET_TO_NAME = {
 
 MACROS = ["Credit Card Growth", "CPIH", "Unemployment", "GDP", "Yield Spread"]
 MICROS = [
-    "RSI: Predominantly food stores",
-    "RSI: Clothing & Footwear",
-    "RSI: Household goods",
-    "Non-store Retailing",
-    "RSI: Electrical household appliances",
-    "RSI: Watches & Jewellery",
+    "RSI: Predominantly food stores", "RSI: Clothing & Footwear",
+    "RSI: Household goods", "Non-store Retailing",
+    "RSI: Electrical household appliances", "RSI: Watches & Jewellery",
 ]
 
-THRESHOLDS = {
-    "Credit Card Growth": 20,
-    "CPIH": 3,
-    "Unemployment": 6,
-    "GDP": -2,
-    "Yield Spread": 0,
-}
-
 MODEL_META: Dict[str, List[Dict]] = {
-    # Macros endogenously respond to others
     "Credit Card Growth": [
         {"driver": "GDP", "coef": 0.175, "p": 0.000, "sig": True},
         {"driver": "CPIH", "coef": 1.171, "p": 0.003, "sig": True},
@@ -75,28 +71,18 @@ MODEL_META: Dict[str, List[Dict]] = {
         {"driver": "Credit Card Growth", "coef": -0.037, "p": 0.000, "sig": True},
         {"driver": "Yield Spread", "coef": 0.174, "p": 0.013, "sig": True},
     ],
-    "CPIH": [
-        {"driver": "Credit Card Growth", "coef": 0.067, "p": 0.006, "sig": True},
-    ],
-
-    # Micros respond to macros
-    "RSI: Predominantly food stores": [
-        {"driver": "Credit Card Growth", "coef": -0.170, "p": 0.000, "sig": True},
-    ],
+    "CPIH": [{"driver": "Credit Card Growth", "coef": 0.067, "p": 0.006, "sig": True}],
+    "RSI: Predominantly food stores": [{"driver": "Credit Card Growth", "coef": -0.170, "p": 0.000, "sig": True}],
     "RSI: Clothing & Footwear": [
         {"driver": "GDP", "coef": 1.282, "p": 0.000, "sig": True},
         {"driver": "Credit Card Growth", "coef": 1.168, "p": 0.000, "sig": True},
     ],
-    "RSI: Household goods": [
-        {"driver": "GDP", "coef": 1.162, "p": 0.000, "sig": True},
-    ],
+    "RSI: Household goods": [{"driver": "GDP", "coef": 1.162, "p": 0.000, "sig": True}],
     "Non-store Retailing": [
         {"driver": "Credit Card Growth", "coef": -0.859, "p": 0.000, "sig": True},
         {"driver": "GDP", "coef": -0.241, "p": 0.000, "sig": True},
     ],
-    "RSI: Electrical household appliances": [
-        {"driver": "GDP", "coef": 0.585, "p": 0.000, "sig": True},
-    ],
+    "RSI: Electrical household appliances": [{"driver": "GDP", "coef": 0.585, "p": 0.000, "sig": True}],
     "RSI: Watches & Jewellery": [
         {"driver": "GDP", "coef": 1.474, "p": 0.000, "sig": True},
         {"driver": "Credit Card Growth", "coef": 1.046, "p": 0.000, "sig": True},
@@ -108,271 +94,278 @@ MODEL_META: Dict[str, List[Dict]] = {
 # =========================
 
 def detect_time_col(df: pd.DataFrame) -> str:
-    candidates = [c for c in df.columns if c.lower() in ("date", "quarter", "unnamed: 0")]
-    if candidates:
-        return candidates[0]
-    first = df.columns[0]
-    try:
-        pd.to_datetime(df[first])
-        return first
-    except Exception:
-        pass
-    raise ValueError("No time column found (expect: Date/Quarter/Unnamed: 0).")
-
-def find_forecast_scenarios(df: pd.DataFrame) -> List[Tuple[str, str]]:
-    """Match Forecast_* columns → list of (scenario_token, column_name)."""
-    pairs = []
-    for col in df.columns:
-        m = re.match(r'(?i)^forecast[_\s]*(.+)$', str(col).strip())
-        if m:
-            pairs.append((m.group(1).strip(), col))
-    return pairs
-
-def find_ci_cols(df: pd.DataFrame, scenario: str) -> Tuple[str, str]:
-    """Find Lower/Upper CI columns for a given scenario (flexible matching)."""
-    lower, upper = None, None
-    sl = scenario.lower()
-    scen_tokens = {sl, sl.replace(" ", "_"), sl.replace("_", " "), sl.title(), sl.capitalize()}
-    for col in df.columns:
-        cl = str(col).lower()
-        if "lower" in cl and any(tok in cl for tok in scen_tokens):
-            lower = col
-        if "upper" in cl and any(tok in cl for tok in scen_tokens):
-            upper = col
-    return lower, upper
-
-# ---------- PeriodIndex-safe quarter builder ----------
-def _qindex(dates) -> pd.PeriodIndex:
-    """Return a quarterly PeriodIndex from many input types without calling to_datetime on Periods."""
-    if isinstance(dates, pd.PeriodIndex):
+    for c in df.columns:
+        if str(c).strip().lower() in ("date", "quarter", "unnamed: 0", "time", "period"):
+            return c
+    for c in df.columns:
         try:
-            return dates.asfreq("Q")
+            pd.to_datetime(df[c], errors="raise"); return c
         except Exception:
-            return dates
+            continue
+    return df.columns[0]
+
+def _qindex(dates) -> pd.PeriodIndex:
+    if isinstance(dates, pd.PeriodIndex):
+        try: return dates.asfreq("Q")
+        except Exception: return dates
     if isinstance(dates, pd.DatetimeIndex):
         return dates.to_period("Q")
     if isinstance(dates, pd.Series):
-        if is_period_dtype(dates.dtype):
-            return pd.PeriodIndex(dates.astype("period[Q]"))
-        if is_datetime64_any_dtype(dates.dtype):
-            return pd.DatetimeIndex(dates).to_period("Q")
-        dt = pd.to_datetime(dates, errors="coerce")
-        return pd.DatetimeIndex(dt).to_period("Q")
-    try:
-        return pd.PeriodIndex(dates, freq="Q")
+        if is_period_dtype(dates.dtype): return pd.PeriodIndex(dates.astype("period[Q]"))
+        if is_datetime64_any_dtype(dates.dtype): return pd.DatetimeIndex(dates).to_period("Q")
+        dt = pd.to_datetime(dates, errors="coerce"); return pd.DatetimeIndex(dt).to_period("Q")
+    try: return pd.PeriodIndex(dates, freq="Q")
     except Exception:
-        dt = pd.to_datetime(dates, errors="coerce")
-        return pd.DatetimeIndex(dt).to_period("Q")
-
-# ---------- PeriodIndex-safe alignment ----------
-def align_by_quarter(s: pd.Series, target_dates, lag: int = 0) -> pd.Series:
-    """Align series to target quarters using PeriodIndex; supports lags (in quarters)."""
-    if isinstance(s.index, pd.PeriodIndex):
-        s_q = s.copy()
-        try:
-            s_q.index = s_q.index.asfreq("Q")
-        except Exception:
-            pass
-    elif isinstance(s.index, pd.DatetimeIndex):
-        s_q = s.copy()
-        s_q.index = s_q.index.to_period("Q")
-    else:
-        s_q = pd.Series(s.values, index=_qindex(s.index))
-    s_q = s_q.sort_index()
-    if lag > 0:
-        s_q = s_q.shift(lag)
-
-    tgt_q = target_dates if isinstance(target_dates, pd.PeriodIndex) else _qindex(target_dates)
-    try:
-        tgt_q = tgt_q.asfreq("Q")
-    except Exception:
-        pass
-
-    out = s_q.reindex(tgt_q)
-    return out.ffill().bfill()
+        dt = pd.to_datetime(dates, errors="coerce"); return pd.DatetimeIndex(dt).to_period("Q")
 
 def read_all_sheets(file_path: str) -> Dict[str, pd.DataFrame]:
-    """Return dict[var_name] -> tidy df with:
-       Quarter | Scenario | Actual | Forecast | (optional) Lower CI | Upper CI | Crisis_* flags
-    """
     xls = pd.ExcelFile(file_path)
     out = {}
+    CANON_SCN = {"baseline":"Baseline","recession":"Recession","recovery":"Recovery","crisis":"Crisis"}
 
-    CANON_SCN = {
-        "baseline": "Baseline", "recession": "Recession",
-        "recovery": "Recovery", "crisis": "Crisis"
-    }
+    def find_forecast_scenarios(df):
+        pairs=[]
+        for col in df.columns:
+            m=re.match(r'(?i)^forecast[_\s]*(.+)$', str(col).strip())
+            if m: pairs.append((m.group(1).strip(), col))
+        return pairs
+
+    def find_ci_cols(df, scenario):
+        lower, upper=None, None
+        sl=scenario.lower()
+        toks={sl, sl.replace(" ","_"), sl.replace("_"," "), sl.title(), sl.capitalize()}
+        for col in df.columns:
+            cl=str(col).lower()
+            if "lower" in cl and any(t in cl for t in toks): lower=col
+            if "upper" in cl and any(t in cl for t in toks): upper=col
+        return lower, upper
 
     for sheet in xls.sheet_names:
-        if sheet not in SHEET_TO_NAME:
-            continue
+        if sheet not in SHEET_TO_NAME: continue
         nice = SHEET_TO_NAME[sheet]
         df = pd.read_excel(file_path, sheet_name=sheet)
         df.columns = df.columns.astype(str).str.strip()
-
-        # time col
         tcol = detect_time_col(df)
-        df = df.rename(columns={tcol: "Quarter"})
+        df = df.rename(columns={tcol:"Quarter"})
         df["Quarter"] = pd.to_datetime(df["Quarter"], errors="coerce")
 
-        # scenarios
-        scn_pairs = find_forecast_scenarios(df)  # [(ScenarioToken, Forecast_Column)]
+        scn_pairs = find_forecast_scenarios(df)
         crisis_cols = [c for c in df.columns if str(c).startswith("Crisis_")]
         actual_exists = "Actual" in df.columns
-
-        frames = []
+        frames=[]
         if scn_pairs:
             for scn_raw, fcol in scn_pairs:
-                key = scn_raw.lower().replace(" ", "").replace("_", "")
-                scn_name = CANON_SCN.get(key, scn_raw.replace("_", " ").title())
+                key=scn_raw.lower().replace(" ","").replace("_","")
+                scn_name = CANON_SCN.get(key, scn_raw.replace("_"," ").title())
                 keep = ["Quarter", fcol] + (["Actual"] if actual_exists else []) + crisis_cols
-                tmp = df[keep].copy().rename(columns={fcol: "Forecast"})
-                tmp["Scenario"] = scn_name
-
+                tmp = df[keep].copy().rename(columns={fcol:"Forecast"}); tmp["Scenario"] = scn_name
                 lcol, ucol = find_ci_cols(df, scn_raw)
-                if lcol and ucol and (lcol in df.columns) and (ucol in df.columns):
-                    tmp["Lower CI"] = df[lcol].values
-                    tmp["Upper CI"] = df[ucol].values
-
+                if lcol and ucol and lcol in df.columns and ucol in df.columns:
+                    tmp["Lower CI"]=df[lcol].values; tmp["Upper CI"]=df[ucol].values
                 frames.append(tmp)
         else:
-            # fallback single Forecast
-            if "Forecast" not in df.columns:
-                continue
-            tmp = df[["Quarter", "Forecast"] + (["Actual"] if actual_exists else []) + crisis_cols].copy()
-            tmp["Scenario"] = "Baseline"
-            frames.append(tmp)
+            if "Forecast" not in df.columns: continue
+            tmp = df[["Quarter","Forecast"] + (["Actual"] if actual_exists else []) + crisis_cols].copy()
+            tmp["Scenario"]="Baseline"; frames.append(tmp)
 
         long = pd.concat(frames, ignore_index=True)
-        cols = ["Quarter", "Scenario"]
-        if actual_exists: cols.append("Actual")
-        cols.append("Forecast")
-        if "Lower CI" in long.columns and "Upper CI" in long.columns:
-            cols += ["Lower CI", "Upper CI"]
+        cols=["Quarter","Scenario"] + (["Actual"] if actual_exists else []) + ["Forecast"]
+        if "Lower CI" in long.columns and "Upper CI" in long.columns: cols+=["Lower CI","Upper CI"]
         cols += crisis_cols
-        long = long[cols].sort_values(["Scenario", "Quarter"]).reset_index(drop=True)
-        out[nice] = long
-
+        out[nice] = long[cols].sort_values(["Scenario","Quarter"]).reset_index(drop=True)
     return out
 
 def to_index_100_safe(y: pd.Series) -> pd.Series:
-    y = pd.Series(y).dropna().astype(float)
+    y=pd.Series(y).dropna().astype(float)
     if y.empty: return y
-    base = y.iloc[0]
-    return (y / base * 100.0) if pd.notna(base) and base != 0 else y
+    base=y.iloc[0]
+    return (y/base*100) if pd.notna(base) and base!=0 else y
 
 def to_index_100_relative(y: pd.Series, base_value: float) -> pd.Series:
-    y = pd.Series(y).astype(float)
-    if pd.isna(base_value) or base_value == 0:
-        return y
-    return (y / base_value) * 100.0
-
-def crisis_mask(series: pd.Series, threshold: float) -> pd.Series:
-    return (series > threshold) if threshold >= 0 else (series < threshold)
-
-def add_threshold_line(fig: go.Figure, y: float, x0, x1, row=None, col=None):
-    if row is not None and col is not None:
-        fig.add_hline(y=y, line_color="red", line_dash="dash", row=row, col=col)
-    else:
-        fig.add_hline(y=y, line_color="red", line_dash="dash")
-
-def add_crisis_markers(fig: go.Figure, x, y, threshold: float, row=None, col=None):
-    y = pd.Series(y, index=pd.Index(x))
-    m = crisis_mask(y, threshold)
-    cross = (~m.shift(1, fill_value=False)) & m
-    if cross.any():
-        tr = go.Scatter(x=y.index[cross], y=y[cross], mode="markers",
-                        marker=dict(symbol="x", size=9, color="red"),
-                        name="Threshold crossed", showlegend=False)
-        if row is not None and col is not None:
-            fig.add_trace(tr, row=row, col=col)
-        else:
-            fig.add_trace(tr)
+    y=pd.Series(y).astype(float)
+    if pd.isna(base_value) or base_value==0: return y
+    return (y/base_value)*100.0
 
 def add_hist_forecast_divider(fig: go.Figure, df: pd.DataFrame, row=None, col=None):
     if "Actual" in df.columns and df["Actual"].notna().any() and df["Forecast"].notna().any():
-        idx = df["Forecast"].first_valid_index()
+        idx=df["Forecast"].first_valid_index()
         if idx is not None:
-            x0 = df.loc[idx, "Quarter"]
-            if row is not None and col is not None:
-                fig.add_vline(x=x0, line_dash="dot", line_width=1, row=row, col=col)
-            else:
-                fig.add_vline(x=x0, line_dash="dot", line_width=1)
-
-def add_crisis_bands(fig: go.Figure, df: pd.DataFrame, row=None, col=None):
-    crisis_cols = [c for c in df.columns if str(c).startswith("Crisis_")]
-    if not crisis_cols: return
-    tmp = df[["Quarter"] + crisis_cols].copy()
-    mask = tmp[crisis_cols].sum(axis=1) > 0
-    if not mask.any(): return
-    q = df["Quarter"].values
-    on = False; start = None
-    for i, flag in enumerate(mask):
-        if flag and not on:
-            on = True; start = q[i]
-        if on and (i == len(mask) - 1 or not mask.iloc[i + 1]):
-            end = q[i]
-            if row is not None and col is not None:
-                fig.add_vrect(x0=start, x1=end, fillcolor="lightgrey", opacity=0.2, line_width=0, row=row, col=col)
-            else:
-                fig.add_vrect(x0=start, x1=end, fillcolor="lightgrey", opacity=0.2, line_width=0)
-            on = False
-
-# --------- Global historical crisis shading (all graphs) ----------
-CRISIS_PERIODS = [
-    # 2008–09 Financial Crisis: red
-    {"x0": "2008-01-01", "x1": "2009-12-31", "fillcolor": "rgba(255,0,0,0.18)"},
-    # 2020 COVID: purple
-    {"x0": "2020-03-01", "x1": "2021-03-31", "fillcolor": "rgba(128,0,128,0.18)"},
-    # 2022–23 Recession: orange
-    {"x0": "2022-01-01", "x1": "2023-12-31", "fillcolor": "rgba(255,165,0,0.18)"},
-]
-
-def add_global_crisis_bands(fig: go.Figure, row=None, col=None):
-    """Add fixed historical shaded bands to any figure (or subplot via row/col)."""
-    for p in CRISIS_PERIODS:
-        if row is not None and col is not None:
-            fig.add_vrect(x0=p["x0"], x1=p["x1"], fillcolor=p["fillcolor"], opacity=0.25, line_width=0, row=row, col=col)
-        else:
-            fig.add_vrect(x0=p["x0"], x1=p["x1"], fillcolor=p["fillcolor"], opacity=0.25, line_width=0)
+            x0=df.loc[idx,"Quarter"]
+            if row and col: fig.add_vline(x=x0, line_dash="dot", line_width=1, row=row, col=col)
+            else: fig.add_vline(x=x0, line_dash="dot", line_width=1)
 
 def add_ci_band(fig: go.Figure, df: pd.DataFrame, norm_on: bool, row=None, col=None):
     if {"Upper CI", "Lower CI"}.issubset(df.columns):
-        up, lo = df["Upper CI"], df["Lower CI"]
+        up = pd.to_numeric(df["Upper CI"], errors="coerce")
+        lo = pd.to_numeric(df["Lower CI"], errors="coerce")
         if up.notna().any() and lo.notna().any():
             if norm_on:
-                up = to_index_100_safe(up); lo = to_index_100_safe(lo)
-            t_up = go.Scatter(x=df["Quarter"], y=up, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip")
+                f = pd.to_numeric(df["Forecast"], errors="coerce").dropna()
+                base0 = f.iloc[0] if len(f) else np.nan
+                if pd.notna(base0) and base0 != 0:
+                    up = to_index_100_relative(up, base0)
+                    lo = to_index_100_relative(lo, base0)
+            t_up = go.Scatter(x=df["Quarter"], y=up, mode="lines", line=dict(width=0),
+                              showlegend=False, hoverinfo="skip")
             t_lo = go.Scatter(x=df["Quarter"], y=lo, mode="lines", line=dict(width=0),
-                              fill="tonexty", fillcolor="rgba(0,0,0,0.12)", showlegend=False, hoverinfo="skip")
-            if row is not None and col is not None:
-                fig.add_trace(t_up, row=row, col=col)
-                fig.add_trace(t_lo, row=row, col=col)
+                              fill="tonexty", fillcolor="rgba(0,0,0,0.12)",
+                              showlegend=False, hoverinfo="skip")
+            if row and col:
+                fig.add_trace(t_up, row=row, col=1); fig.add_trace(t_lo, row=row, col=1)
             else:
                 fig.add_trace(t_up); fig.add_trace(t_lo)
 
-def relationship_table(target: str):
-    rows = MODEL_META.get(target, [])
-    if not rows:
-        return html.Div("No model metadata.", style={"fontStyle":"italic"})
-    rows = sorted(rows, key=lambda r: abs(r["coef"]), reverse=True)
-    header = html.Tr([html.Th("Driver"), html.Th("Coef"), html.Th("Signif")])
-    body = []
-    for r in rows:
-        sign = "✅" if r.get("sig") else "❌"
-        body.append(html.Tr([html.Td(r["driver"]), html.Td(f'{r["coef"]:+.3f}'), html.Td(sign)]))
-    return html.Div([
-        html.Div("Exogenous drivers (ranked by |coef|)", style={"fontWeight":"600","marginBottom":"4px"}),
-        html.Table([header] + body, style={"width":"100%","borderCollapse":"collapse","fontSize":"12px"})
-    ], style={"marginTop":"6px"})
+# ======= Crisis shading & legend — exact color match =======
+def hex_to_rgba(hex_color: str, alpha: float) -> str:
+    hex_color = hex_color.lstrip('#'); r = int(hex_color[0:2],16); g = int(hex_color[2:4],16); b=int(hex_color[4:6],16)
+    return f"rgba({r},{g},{b},{alpha})"
 
-def model_badge_text(var: str) -> str:
-    rows = MODEL_META.get(var, [])
-    if any("lag" in r["driver"] for r in rows): model = "SARIMAX (lags)"
-    elif rows: model = "ARIMAX"
-    else: model = "—"
-    sig = ", ".join([f'{r["driver"]} ({r["coef"]:+.3f})' for r in rows]) or "—"
-    return f"Model: {model}. Drivers: {sig}"
+CRISIS_PERIODS = [
+    {"x0":"2008-01-01","x1":"2009-12-31","hex":"#ff0000", "name":"2008–09 crisis"},
+    {"x0":"2020-03-01","x1":"2021-03-31","hex":"#800080", "name":"2020–21 COVID-19"},
+    {"x0":"2022-01-01","x1":"2023-12-31","hex":"#ff8c00", "name":"2022–23 recession"},
+]
+
+def add_global_crisis_bands(fig: go.Figure, row=None, col=None, alpha=0.35):
+    for p in CRISIS_PERIODS:
+        fill = hex_to_rgba(p["hex"], alpha)
+        if row and col:
+            fig.add_vrect(x0=p["x0"], x1=p["x1"], fillcolor=fill, opacity=1.0, line_width=0, row=row, col=col)
+        else:
+            fig.add_vrect(x0=p["x0"], x1=p["x1"], fillcolor=fill, opacity=1.0, line_width=0)
+
+def add_crisis_legend(fig: go.Figure):
+    for p in CRISIS_PERIODS:
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
+                                 line=dict(color=p["hex"], width=8),
+                                 name=p["name"], hoverinfo="skip", showlegend=True, legendgroup="crisis"))
+
+# ======= Consistent bordered-plot styling =======
+def apply_bordered_style(fig: go.Figure):
+    fig.update_layout(paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
+    fig.update_xaxes(showline=True, linewidth=1, linecolor="#bdbdbd", mirror=True, zeroline=False)
+    fig.update_yaxes(showline=True, linewidth=1, linecolor="#bdbdbd", mirror=True, zeroline=False)
+    return fig
+
+# ---------- Thresholds / classification ----------
+def _baseline_df(data: Dict[str,pd.DataFrame], var: str, scn="Baseline") -> pd.DataFrame:
+    if var not in data: return pd.DataFrame()
+    df=data[var]
+    if scn not in df["Scenario"].unique(): scn="Baseline"
+    return df[df["Scenario"]==scn].copy().sort_values("Quarter")
+
+def _hist_series_for_bands(df: pd.DataFrame) -> pd.Series:
+    if "Actual" in df.columns and df["Actual"].notna().any():
+        s=pd.to_numeric(df["Actual"], errors="coerce")
+    else:
+        s=pd.to_numeric(df["Forecast"], errors="coerce")
+    s.index=_qindex(df["Quarter"])
+    return s.dropna()
+
+def calibrate_bands_simple(data: Dict[str,pd.DataFrame], var: str, mode="Balanced") -> Dict[str,float]:
+    q_map={"Early":0.80, "Balanced":0.85, "Conservative":0.95}
+    q=q_map.get(mode,0.85); q_amb=max(0.55, q-0.05)
+    df=_baseline_df(data,var,"Baseline")
+    if df.empty: return {}
+    s=_hist_series_for_bands(df)
+    if s.empty: return {}
+    if var=="GDP":
+        red=float(np.nanpercentile(s,(1-q)*100))
+        amber=float(np.nanpercentile(s,(1-q_amb)*100))
+        return {"direction":"lower","red":red,"amber":amber}
+    else:
+        red=float(np.nanpercentile(s,q*100))
+        amber=float(np.nanpercentile(s,q_amb*100))
+        return {"direction":"upper","red":red,"amber":amber}
+
+def classify_point(value: float, bands: Dict[str,float]) -> str:
+    if not bands or value is None or np.isnan(value): return "Unknown"
+    if bands.get("direction")=="lower":
+        if value<=bands["red"]: return "Red"
+        if value<=bands["amber"]: return "Amber"
+        return "Green"
+    else:
+        if value>=bands["red"]: return "Red"
+        if value>=bands["amber"]: return "Amber"
+        return "Green"
+
+def color_for_state_bg(state: str) -> str:
+    return {"Green":"#e6f4ea","Amber":"#fff59d","Red":"#ffcccc","Unknown":"#f0f0f0"}.get(state, "#f0f0f0")
+
+def latest_value(df: pd.DataFrame, prefer_actual=True) -> Optional[float]:
+    if prefer_actual and "Actual" in df.columns and df["Actual"].notna().any():
+        return float(pd.to_numeric(df["Actual"], errors="coerce").dropna().iloc[-1])
+    if df["Forecast"].notna().any():
+        return float(pd.to_numeric(df["Forecast"], errors="coerce").dropna().iloc[-1])
+    return None
+
+# ---------- People impact helpers ----------
+def yield_spread_logistic_prob(DATA: Dict[str,pd.DataFrame]) -> Optional[float]:
+    try:
+        from sklearn.linear_model import LogisticRegression
+    except Exception:
+        return None
+    if "Yield Spread" not in DATA: return None
+    df=DATA["Yield Spread"].copy().sort_values("Quarter")
+    crisis_cols=[c for c in df.columns if str(c).startswith("Crisis_")]
+    if not crisis_cols: return None
+    y = (df[crisis_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1) > 0).astype(int)
+    x = df["Actual"] if "Actual" in df and df["Actual"].notna().any() else df["Forecast"]
+    x = pd.to_numeric(x, errors="coerce")
+    X = pd.DataFrame({"x":x}).shift(4).dropna()
+    Y = y.loc[X.index]
+    if Y.nunique()<2 or len(X)<20: return None
+    try:
+        lr=LogisticRegression(); lr.fit(X, Y)
+        p=float(lr.predict_proba([[X.iloc[-1,0]]])[0,1])
+        return p
+    except Exception:
+        return None
+
+def people_impact_panel(DATA: Dict[str,pd.DataFrame], mode: str) -> Dict[str, str]:
+    cpi_df=_baseline_df(DATA,"CPIH"); cpi = latest_value(cpi_df)
+    basket_month = 2200
+    monthly_cost = None if cpi is None else basket_month * (cpi/100.0)
+
+    un_df=_baseline_df(DATA,"Unemployment"); un = latest_value(un_df)
+    gdp_df=_baseline_df(DATA,"GDP")
+    gvals = pd.to_numeric(gdp_df["Actual"] if "Actual" in gdp_df and gdp_df["Actual"].notna().any() else gdp_df["Forecast"], errors="coerce").dropna()
+    g_mom = None if len(gvals)<3 else float(gvals.iloc[-1]-gvals.iloc[-3])
+
+    cc_df=_baseline_df(DATA,"Credit Card Growth"); cc=latest_value(cc_df, prefer_actual=False)
+    ys_df=_baseline_df(DATA,"Yield Spread"); ys=latest_value(ys_df)
+    credit_stress="Normal"
+    if cc is not None and ys is not None:
+        if cc>=20 or ys<0: credit_stress="Elevated"
+        if cc>=30 and ys< -0.2: credit_stress="High"
+
+    p = yield_spread_logistic_prob(DATA)
+    p_txt = "—" if p is None else f"{p*100:.0f}%"
+
+    job_heat = "Moderate"
+    if (un is not None and un >= 7) or (g_mom is not None and g_mom < -1):
+        job_heat = "Hot (Tight market risk)"
+    elif (un is not None and un <= 4) and (g_mom is not None and g_mom > 0.5):
+        job_heat = "Cool (Improving)"
+
+    para=[]
+    if cpi is not None: para.append(f"Prices rising ~{cpi:.1f}%, ~£{monthly_cost:,.0f}/mo extra.")
+    if un is not None: para.append(f"Unemployment ~{un:.1f}%.")
+    if g_mom is not None: para.append("Growth " + ("weaker" if g_mom<0 else "firmer") + " lately.")
+    if credit_stress!="Normal": para.append(f"Borrowing {credit_stress.lower()}.")
+    if p is not None: para.append(f"Curve signal puts downturn odds ~{p_txt}.")
+    story=" ".join(para) if para else "We’ll summarise conditions here as data loads."
+
+    return {
+        "cpi": "—" if cpi is None else f"{cpi:.1f}%",
+        "un": "—" if un is None else f"{un:.1f}%",
+        "gdp_mom": "—" if g_mom is None else f"{g_mom:+.2f} pts",
+        "prob": p_txt,
+        "monthly_cost": "—" if monthly_cost is None else f"£{monthly_cost:,.0f}/mo",
+        "job_heat": job_heat,
+        "credit": credit_stress,
+        "story": story
+    }
 
 def _parse_driver(name: str) -> Tuple[str, int]:
     if "_lag" in name:
@@ -381,510 +374,723 @@ def _parse_driver(name: str) -> Tuple[str, int]:
         except: return base, 0
     return name, 0
 
-# ---------- Simulation helpers ----------
+def align_by_quarter(s: pd.Series, target_dates, lag: int = 0) -> pd.Series:
+    if isinstance(s.index, pd.PeriodIndex):
+        s_q=s.copy()
+        try: s_q.index=s_q.index.asfreq("Q")
+        except Exception: pass
+    elif isinstance(s.index, pd.DatetimeIndex):
+        s_q=s.copy(); s_q.index=s_q.index.to_period("Q")
+    else:
+        s_q=pd.Series(s.values, index=_qindex(s.index))
+    s_q=s_q.sort_index()
+    if lag>0: s_q=s_q.shift(lag)
+    tgt_q=target_dates if isinstance(target_dates,pd.PeriodIndex) else _qindex(target_dates)
+    try: tgt_q=tgt_q.asfreq("Q")
+    except Exception: pass
+    out=s_q.reindex(tgt_q)
+    return out.ffill().bfill()
 
 def macro_adjusted_series(DATA: Dict[str, pd.DataFrame], scn: str, pct_map: Dict[str, float]) -> Dict[str, pd.DataFrame]:
-    """Endogenous macro propagation with QUARTER alignment; returns dict[var] with 'Adj Forecast'."""
-    present_macros = [m for m in MACROS if m in DATA]
-
-    # Base series per macro
-    base: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {}
+    present_macros=[m for m in MACROS if m in DATA]
+    base={}
     for var in present_macros:
-        dfb = DATA[var][DATA[var]["Scenario"] == scn].copy().sort_values("Quarter")
-        s = pd.Series(dfb["Forecast"].values, index=_qindex(dfb["Quarter"]))
-        base[var] = (dfb, s)
-
-    # Direct slider shocks (exogenous)
-    forced: Dict[str, pd.Series] = {}
+        dfb=DATA[var][DATA[var]["Scenario"]==scn].copy().sort_values("Quarter")
+        s=pd.Series(dfb["Forecast"].values, index=_qindex(dfb["Quarter"]))
+        base[var]=(dfb,s)
+    forced={}
     for var in present_macros:
-        _, s_base = base[var]
-        pct = (pct_map.get(var, 0.0) or 0.0) / 100.0
-        forced[var] = s_base * (1.0 + pct)
-
-    # Iterate with model propagation
-    adj = {var: forced[var].copy() for var in present_macros}
-    MAX_ITERS, TOL = 12, 1e-6
+        _,s_base=base[var]; pct=(pct_map.get(var,0.0) or 0.0)/100.0
+        forced[var]=s_base*(1.0+pct)
+    adj={var:forced[var].copy() for var in present_macros}
+    MAX_ITERS,TOL=12,1e-6
     for _ in range(MAX_ITERS):
-        maxdiff = 0.0
-        new_adj: Dict[str, pd.Series] = {}
+        maxdiff=0.0; new_adj={}
         for var in present_macros:
-            s_target = forced[var].copy()
-            tgt_q = s_target.index  # PeriodIndex
-            for d in MODEL_META.get(var, []):
+            s_target=forced[var].copy(); tgt_q=s_target.index
+            for d in MODEL_META.get(var,[]):
                 drv_name, lag = _parse_driver(d["driver"])
-                if drv_name not in base or drv_name not in adj:
-                    continue
-                _, s_bdrv = base[drv_name]
-                s_adrv = adj[drv_name]
-
-                s_b = align_by_quarter(s_bdrv, tgt_q, lag)
-                s_a = align_by_quarter(s_adrv, tgt_q, lag)
-                delta = (s_a - s_b).fillna(0.0)
-
-                s_target = s_target.add(float(d["coef"]) * delta, fill_value=0.0)
-
-            new_adj[var] = s_target
-            prev = adj[var].reindex(s_target.index)
-            diff = (s_target - prev).abs().max(skipna=True)
-            if pd.notna(diff) and float(diff) > maxdiff:
-                maxdiff = float(diff)
-
-        adj = new_adj
-        if not np.isfinite(maxdiff) or maxdiff < TOL:
-            break
-
-    # Build output frames
-    out: Dict[str, pd.DataFrame] = {}
+                if drv_name not in base or drv_name not in adj: continue
+                _, s_bdrv = base[drv_name]; s_adrv = adj[drv_name]
+                s_b = align_by_quarter(s_bdrv, tgt_q, lag); s_a = align_by_quarter(s_adrv, tgt_q, lag)
+                delta=(s_a-s_b).fillna(0.0)
+                s_target=s_target.add(float(d["coef"])*delta, fill_value=0.0)
+            new_adj[var]=s_target
+            prev=adj[var].reindex(s_target.index)
+            diff=(s_target-prev).abs().max(skipna=True)
+            if pd.notna(diff) and float(diff)>maxdiff: maxdiff=float(diff)
+        adj=new_adj
+        if not np.isfinite(maxdiff) or maxdiff<TOL: break
+    out={}
     for var in present_macros:
-        dfb, _ = base[var]
-        tgt_q = _qindex(dfb["Quarter"])
-        s_adj = adj[var].reindex(tgt_q).astype(float)
-        df_out = dfb.copy()
-        df_out["Adj Forecast"] = s_adj.values
-        out[var] = df_out
-
+        dfb,_=base[var]; tgt_q=_qindex(dfb["Quarter"]); s_adj=adj[var].reindex(tgt_q).astype(float)
+        df_out=dfb.copy(); df_out["Adj Forecast"]=s_adj.values; out[var]=df_out
     return out
 
-def micro_adjusted_series(DATA: Dict[str, pd.DataFrame],
-                          scn: str,
-                          micro_var: str,
-                          base_macros: Dict[str, pd.DataFrame],
-                          adj_macros: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Adjust micro forecast by quarter-aligned macro deltas with MODEL_META."""
-    if micro_var not in DATA:
-        return pd.DataFrame()
+def micro_adjusted_series(DATA: Dict[str,pd.DataFrame], scn: str, adj_macros: Dict[str,pd.DataFrame]) -> Dict[str,pd.DataFrame]:
+    out={}
+    for var in [m for m in MICROS if m in DATA]:
+        df_micro = DATA[var][DATA[var]["Scenario"]==scn].copy().sort_values("Quarter")
+        if df_micro.empty: continue
+        tgt_q = _qindex(df_micro["Quarter"])
 
-    df_micro = DATA[micro_var]
-    df_micro = df_micro[df_micro["Scenario"] == scn].copy().sort_values("Quarter")
+        baseF = pd.to_numeric(df_micro["Forecast"], errors="coerce")
+        adjF = baseF.copy()
 
-    if "Forecast" not in df_micro.columns:
-        df_micro["Adj Forecast"] = np.nan
-        return df_micro
+        for d in MODEL_META.get(var, []):
+            drv_name, lag = _parse_driver(d["driver"])
+            if drv_name not in DATA or drv_name not in adj_macros:
+                continue
 
-    drivers = MODEL_META.get(micro_var, [])
-    tgt_q = _qindex(df_micro["Quarter"])
-    adj_series = pd.Series(df_micro["Forecast"].astype(float).values, index=tgt_q)
+            df_bdrv = DATA[drv_name][DATA[drv_name]["Scenario"]==scn].copy().sort_values("Quarter")
+            s_b = pd.to_numeric(df_bdrv["Forecast"], errors="coerce"); s_b.index = _qindex(df_bdrv["Quarter"])
+            df_adrv = adj_macros[drv_name].copy().sort_values("Quarter")
+            s_a = pd.to_numeric(df_adrv.get("Adj Forecast", df_adrv["Forecast"]), errors="coerce"); s_a.index = _qindex(df_adrv["Quarter"])
 
-    for d in drivers:
-        drv_name, lag = _parse_driver(d["driver"])
-        base_df = base_macros.get(drv_name)
-        adj_df = adj_macros.get(drv_name)
-        if base_df is None or adj_df is None:
-            continue
+            delta = align_by_quarter(s_a, tgt_q, lag) - align_by_quarter(s_b, tgt_q, lag)
+            adjF = adjF.add(float(d["coef"]) * delta.values, fill_value=0.0)
 
-        s_base = pd.Series(base_df["Forecast"].values, index=_qindex(base_df["Quarter"]))
-        s_adj  = pd.Series(adj_df.get("Adj Forecast", adj_df["Forecast"]).values, index=_qindex(adj_df["Quarter"]))
+        df_out = df_micro.copy()
+        df_out["Adj Forecast"] = adjF.values
+        out[var] = df_out
+    return out
 
-        s_b = align_by_quarter(s_base, df_micro["Quarter"], lag)
-        s_a = align_by_quarter(s_adj,  df_micro["Quarter"], lag)
-        delta = (s_a - s_b).reindex(tgt_q).fillna(0.0)
+def tidy_var_scenarios(data: Dict[str,pd.DataFrame])->Dict[str,List[str]]:
+    return {var:sorted([s for s in df["Scenario"].dropna().unique().tolist()]) for var,df in data.items()}
 
-        adj_series = adj_series.add(float(d["coef"]) * delta, fill_value=0.0)
-
-    df_micro["Adj Forecast"] = adj_series.reindex(tgt_q).values
-    return df_micro
-
-def tidy_var_scenarios(data: Dict[str, pd.DataFrame]) -> Dict[str, List[str]]:
-    return {
-        var: sorted([s for s in df["Scenario"].dropna().unique().tolist()])
-        for var, df in data.items()
-    }
-
-def scenario_exists_for_var(var: str, scn: str, var_scenarios: Dict[str, List[str]]) -> bool:
+def scenario_exists_for_var(var: str, scn: str, var_scenarios: Dict[str,List[str]])->bool:
     return scn in (var_scenarios.get(var) or [])
 
-def scenario_identical_note(var: str, scn: str, data: Dict[str, pd.DataFrame]) -> str:
-    if var not in data or scn == "Baseline":
-        return ""
-    df_all = data[var]
-    have = set(df_all["Scenario"].unique().tolist())
-    if not {"Baseline", scn}.issubset(have):
-        return ""
-    b = df_all[df_all["Scenario"] == "Baseline"].set_index("Quarter")["Forecast"]
-    s = df_all[df_all["Scenario"] == scn].set_index("Quarter")["Forecast"]
-    b, s = b.align(s, join="inner")
-    if b.empty:
-        return ""
-    if np.allclose(b.values, s.values, equal_nan=True, rtol=1e-12, atol=1e-12):
-        return f"(Note: For {var}, '{scn}' is identical to 'Baseline' in the source file.)"
-    return ""
+# ======= Overall crisis probability (from adjusted macros) =======
+def _ecdf_prob(s: pd.Series, v: float) -> Optional[float]:
+    arr = np.sort(pd.to_numeric(s, errors="coerce").dropna().values)
+    if len(arr)==0 or v is None or not np.isfinite(v): return None
+    F = np.searchsorted(arr, v, side="right") / len(arr)
+    return float(F)
+
+def overall_crisis_prob_from_adj(DATA: Dict[str,pd.DataFrame], adj_macros: Dict[str,pd.DataFrame], mode: str) -> Optional[float]:
+    if not adj_macros: return None
+    w_base = {"GDP":0.28, "Unemployment":0.28, "CPIH":0.20, "Yield Spread":0.18, "Credit Card Growth":0.06}
+    gamma_map = {"Early":0.85, "Balanced":1.0, "Conservative":1.25}
+    gamma = gamma_map.get(mode, 1.0)
+
+    ps, ws = [], []
+    for var in MACROS:
+        if var not in DATA: continue
+        df_hist = _baseline_df(DATA, var, "Baseline")
+        if df_hist.empty: continue
+        s_hist = _hist_series_for_bands(df_hist)
+
+        v = None
+        if var in adj_macros and "Adj Forecast" in adj_macros[var]:
+            v = pd.to_numeric(adj_macros[var]["Adj Forecast"], errors="coerce").dropna()
+            v = float(v.iloc[-1]) if len(v) else None
+        if v is None:
+            dfb = DATA[var][DATA[var]["Scenario"]=="Baseline"].copy().sort_values("Quarter")
+            v = latest_value(dfb, prefer_actual=False)
+
+        F = _ecdf_prob(s_hist, v)
+        if F is None: continue
+        direction = calibrate_bands_simple(DATA, var, mode).get("direction","upper")
+        p_i = F if direction=="upper" else (1.0 - F)
+        p_i = min(max(p_i, 0.0), 1.0) ** gamma
+        ws.append(w_base.get(var, 0.1)); ps.append(p_i)
+
+    if not ps: return None
+    ws = np.array(ws, dtype=float); ws = ws / ws.sum()
+    ps = np.array(ps, dtype=float)
+    prod = np.prod(1.0 - ws * ps)
+    return float(1.0 - prod)
 
 # =========================
 # ====== LOAD DATA ========
 # =========================
 
 if FILE_PATH is None:
-    DATA = {}
-    LOAD_ERROR = "Dataset not found. Place 'Scenario_Forecasts_NEW.xlsx' in the project root, a 'data/' folder, or set SCENARIO_XLSX."
+    DATA={}
+    LOAD_ERROR="Dataset not found. Place 'Scenario_Forecasts_NEW.xlsx' in the working folder, a 'data/' folder, or set SCENARIO_XLSX."
 else:
-    DATA = read_all_sheets(str(FILE_PATH))
-    LOAD_ERROR = ""
+    DATA=read_all_sheets(str(FILE_PATH))
+    LOAD_ERROR=""
 
-VAR_SCENARIOS = tidy_var_scenarios(DATA)
-
-macro_opts = [{"label": m, "value": m} for m in MACROS if m in DATA]
-micro_opts = [{"label": m, "value": m} for m in MICROS if m in DATA]
-
-avail_scn_all = sorted(set(sum([DATA[k]["Scenario"].dropna().unique().tolist() for k in DATA], []))) if DATA else []
-scenario_opts_global = [{"label": s, "value": s} for s in (avail_scn_all or ["Baseline"])]
+VAR_SCENARIOS=tidy_var_scenarios(DATA)
+macro_opts=[{"label":m,"value":m} for m in MACROS if m in DATA]
+micro_opts=[{"label":m,"value":m} for m in MICROS if m in DATA]
+avail_scn_all=sorted(set(sum([DATA[k]["Scenario"].dropna().unique().tolist() for k in DATA], []))) if DATA else []
+scenario_opts_global=[{"label":s,"value":s} for s in (avail_scn_all or ["Baseline"])]
 
 # =========================
-# ====== DASH UI ==========
+# ====== UI / LAYOUT ======
 # =========================
 
-app = Dash(__name__, suppress_callback_exceptions=True)
-server = app.server  # <-- important for Gunicorn on Render
+external_stylesheets = [dbc.themes.LUX] if USE_DBC else []
+app = Dash(__name__, external_stylesheets=external_stylesheets)
 
-def pct_slider(id_, label):
+def kpi_card(title, value, sub=None, color="primary"):
+    if USE_DBC:
+        return dbc.Card(
+            dbc.CardBody([
+                html.Div(title, className="text-muted"),
+                html.H3(value, className=f"text-{color}"),
+                html.Div(sub or "", style={"fontSize":"12px","opacity":0.8})
+            ]), className="shadow-sm"
+        )
     return html.Div([
-        html.Label(f"{label} (%)"),
-        dcc.Slider(id=id_, min=-50, max=50, step=1, value=0,
-                   marks={-50: "-50", -25: "-25", 0: "0", 25: "25", 50: "+50"})
-    ], style={"minWidth": "220px", "flex": "1 1 260px"})
+        html.Div(title, style={"color":"#6c757d"}), html.H3(value, style={"color":"#0d6efd"}),
+        html.Div(sub or "", style={"fontSize":"12px","opacity":0.8})
+    ], style={"border":"1px solid #eee","padding":"12px","borderRadius":"10px","boxShadow":"0 1px 5px rgba(0,0,0,0.05)","background":"#fff"})
 
-top_banner = html.Div(
-    LOAD_ERROR,
-    style={"background":"#ffecec","border":"1px solid #ffb3b3","padding":"8px 12px","borderRadius":"8px","color":"#b30000","marginBottom":"10px"}
-) if LOAD_ERROR else None
+def info_badge(text, bgcolor):
+    style={"display":"inline-block","padding":"4px 10px","borderRadius":"999px","background":bgcolor,"border":"1px solid #ddd","fontSize":"12px","marginRight":"6px","marginBottom":"6px"}
+    return html.Span(text, style=style)
 
-app.layout = html.Div([
-    html.H2("📊 Economic Forecasts"),
-    *( [top_banner] if top_banner else [] ),
-
-    dcc.Checklist(id="normalize-toggle", options=[{"label":" Normalize to index = 100", "value":"norm"}],
-                  value=["norm"], style={"marginBottom":"6px"}),
-    dcc.Store(id="normalize-flag", storage_type="session"),
-
-    dcc.Tabs(id="tabs", value="tab-macro", children=[
-        # --- Macro tab
-        dcc.Tab(label="Macroeconomic", value="tab-macro", children=[
-            html.Div([
-                html.Div([html.Label("Variable"),
-                          dcc.Dropdown(id="macro-var", options=macro_opts,
-                                       value=macro_opts[0]["value"] if macro_opts else None, style={"width":"300px"})],
-                         style={"marginRight":"12px"}),
-                html.Div([html.Label("Scenario"),
-                          dcc.Dropdown(id="macro-scn", options=scenario_opts_global,
-                                       value=scenario_opts_global[0]["value"], style={"width":"220px"})]),
-            ], style={"display":"flex","flexWrap":"wrap","gap":"8px","marginBottom":"8px"}),
-
-            dcc.Graph(id="macro-graph"),
-            html.Div(id="macro-warning", style={"color":"red","fontWeight":"bold","marginTop":"4px"}),
-            html.Div(id="macro-model-meta", style={"fontSize":"12px","opacity":0.85,"marginTop":"4px"}),
-            html.Div(id="macro-rel-card", style={"maxWidth":"560px","marginTop":"6px"}),
-        ]),
-
-        # --- Micro tab
-        dcc.Tab(label="Microeconomic (RSI)", value="tab-micro", children=[
-            html.Div([
-                html.Div([html.Label("Variable"),
-                          dcc.Dropdown(id="micro-var", options=micro_opts,
-                                       value=micro_opts[0]["value"] if micro_opts else None, style={"width":"360px"})],
-                         style={"marginRight":"12px"}),
-                html.Div([html.Label("Scenario"),
-                          dcc.Dropdown(id="micro-scn", options=scenario_opts_global,
-                                       value=scenario_opts_global[0]["value"], style={"width":"220px"})]),
-            ], style={"display":"flex","flexWrap":"wrap","gap":"8px","marginBottom":"8px"}),
-
-            dcc.Graph(id="micro-graph"),
-            html.Div(id="micro-model-meta", style={"fontSize":"12px","opacity":0.85,"marginTop":"4px"}),
-            html.Div(id="micro-rel-card", style={"maxWidth":"560px","marginTop":"6px"}),
-        ]),
-
-        # --- Simulation tab (ALL macros at once)
-        dcc.Tab(label="Simulation", value="tab-sim", children=[
-            html.Div([
-                html.Div([html.Label("View Micro (RSI)"),
-                          dcc.Dropdown(id="sim-micro-var", options=micro_opts,
-                                       value=micro_opts[0]["value"] if micro_opts else None, style={"width":"360px"})],
-                         style={"marginRight":"12px"}),
-                html.Div([html.Label("Scenario (intersection)"),
-                          dcc.Dropdown(id="sim-scn", options=scenario_opts_global,
-                                       value=scenario_opts_global[0]["value"], style={"width":"240px"})]),
-            ], style={"display":"flex","flexWrap":"wrap","gap":"8px","marginBottom":"6px"}),
-
-            html.Div([
-                pct_slider("pct-ccg", "Credit Card Growth"),
-                pct_slider("pct-cpih", "CPIH"),
-                pct_slider("pct-unemp", "Unemployment"),
-                pct_slider("pct-gdp", "GDP"),
-                pct_slider("pct-yield", "Yield Spread"),
-            ], style={"display":"flex","flexWrap":"wrap","gap":"14px","margin":"8px 0 2px 0"}),
-
-            html.Div(id="sim-pct-readout", style={"fontSize":"12px","opacity":0.8,"marginBottom":"4px"}),
-
-            html.Div([
-                html.Div([dcc.Graph(id="sim-macro-graph")], style={"flex":"1 1 800px","minWidth":"320px"}),
-                html.Div([dcc.Graph(id="sim-micro-graph")], style={"flex":"1 1 520px","minWidth":"320px"}),
-            ], style={"display":"flex","flexWrap":"wrap","gap":"12px","alignItems":"stretch"}),
-
-            html.Div("Note: Sliders apply exogenous shocks; macros adjust endogenously via MODEL_META; micro reacts to macro deltas.",
-                     style={"fontSize":"12px","opacity":0.7,"marginTop":"4px"}),
-        ]),
+def scenario_preset_buttons():
+    if not USE_DBC:
+        return html.Div([
+            html.Button("Recession", id="preset-recession"),
+            html.Button("Recovery", id="preset-recovery", style={"marginLeft":"8px"}),
+            html.Button("Sticky inflation", id="preset-infl", style={"marginLeft":"8px"}),
+        ], style={"marginBottom":"8px"})
+    return html.Div([
+        dbc.Button("Recession", id="preset-recession", color="danger", outline=True, className="me-2"),
+        dbc.Button("Recovery", id="preset-recovery", color="success", outline=True, className="me-2"),
+        dbc.Button("Sticky inflation", id="preset-infl", color="warning", outline=True),
     ])
-])
+
+top_banner = (dbc.Alert(LOAD_ERROR, color="danger", className="mb-2") if USE_DBC else
+              html.Div(LOAD_ERROR, style={"background":"#ffecec","border":"1px solid #ffb3b3","padding":"8px 12px","borderRadius":"8px","color":"#b30000","marginBottom":"10px"})) if LOAD_ERROR else None
+
+# ---- Controls (ONLY risk sensitivity now) ----
+controls_block = (
+    (dbc.Card if USE_DBC else html.Div)(
+        (dbc.CardBody if USE_DBC else lambda x: html.Div(x, style={"padding":"10px"}))([
+            html.Div([
+                html.Label("Risk sensitivity"),
+                dcc.RadioItems(
+                    id="risk-mode",
+                    options=[
+                        {"label":" Early (more alerts)  q≈0.80","value":"Early"},
+                        {"label":" Balanced  q≈0.85","value":"Balanced"},
+                        {"label":" Conservative (fewer alerts)  q≈0.95","value":"Conservative"},
+                    ],
+                    value="Balanced", inline=False
+                )
+            ]),
+        ]),
+        className="shadow-sm"
+    )
+)
+
+# --- Tabs layout ---
+TABS = dcc.Tabs(
+    id="tabs", value="tab-people",
+    children=[
+        # 1) People Impact
+        dcc.Tab(label="People Impact", value="tab-people", children=[
+            (dbc.Row if USE_DBC else html.Div)([
+                (dbc.Col if USE_DBC else html.Div)(id="kpi-prob", width=3),
+                (dbc.Col if USE_DBC else html.Div)(id="kpi-cpi", width=3),
+                (dbc.Col if USE_DBC else html.Div)(id="kpi-un", width=3),
+                (dbc.Col if USE_DBC else html.Div)(id="kpi-gdp", width=3),
+            ], className="g-3 my-1"),
+            html.Div([dcc.Graph(id="people-donut")]),
+            (dbc.Row if USE_DBC else html.Div)([
+                (dbc.Col if USE_DBC else html.Div)([html.H5("Current Situation"), html.Div(id="people-cards")], width=6),
+                (dbc.Col if USE_DBC else html.Div)([
+                    html.H5("overview"),
+                    (dbc.Card if USE_DBC else html.Div)(
+                        (dbc.CardBody if USE_DBC else lambda x: html.Div(x, style={"padding": "14px"}))(
+                            [html.Div(id="people-story", style={"fontSize": "14px"})]
+                        ),
+                        className="shadow-sm",
+                    ),
+                ], width=6),
+            ], className="g-3 my-1"),
+        ]),
+
+        # 2) Indicators
+        dcc.Tab(label="Indicators", value="tab-ind", children=[
+            html.H5("Macroeconomic"),
+            (dbc.Row if USE_DBC else html.Div)([
+                (dbc.Col if USE_DBC else html.Div)([
+                    html.Label("Variable"),
+                    dcc.Dropdown(id="macro-var", options=macro_opts, value=macro_opts[0]["value"] if macro_opts else None)
+                ], width=4),
+                (dbc.Col if USE_DBC else html.Div)([
+                    html.Label("Scenario"),
+                    dcc.Dropdown(id="macro-scn", options=scenario_opts_global, value=scenario_opts_global[0]["value"])
+                ], width=3),
+            ], className="g-2"),
+            dcc.Graph(id="macro-graph"),
+            html.Div(id="macro-risk-chip"),
+            html.Hr(),
+            html.H5("Microeconomic (RSI)"),
+            (dbc.Row if USE_DBC else html.Div)([
+                (dbc.Col if USE_DBC else html.Div)([
+                    html.Label("Variable"),
+                    dcc.Dropdown(id="micro-var", options=micro_opts, value=micro_opts[0]["value"] if micro_opts else None)
+                ], width=6),
+                (dbc.Col if USE_DBC else html.Div)([
+                    html.Label("Scenario"),
+                    dcc.Dropdown(id="micro-scn", options=scenario_opts_global, value=scenario_opts_global[0]["value"])
+                ], width=3),
+            ], className="g-2"),
+            dcc.Graph(id="micro-graph"),
+        ]),
+
+        # 3) Simulation
+        dcc.Tab(label="Simulation", value="tab-sim", children=[
+            scenario_preset_buttons(),
+            html.Div(id="sim-overall-prob", className="my-2"),
+            (dbc.Row if USE_DBC else html.Div)([
+                (dbc.Col if USE_DBC else html.Div)([
+                    html.Label("View Micro (RSI)"),
+                    dcc.Dropdown(id="sim-micro-var", options=micro_opts, value=micro_opts[0]["value"] if micro_opts else None)
+                ], width=6),
+                (dbc.Col if USE_DBC else html.Div)([
+                    html.Label("Scenario"),
+                    dcc.Dropdown(id="sim-scn", options=scenario_opts_global, value=scenario_opts_global[0]["value"])
+                ], width=3),
+            ], className="g-2"),
+            (dbc.Row if USE_DBC else html.Div)([
+                (dbc.Col if USE_DBC else html.Div)([html.Label("Δ Credit Card Growth (%)"),
+                    dcc.Slider(id="pct-ccg", min=-50, max=50, step=1, value=0,
+                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
+                (dbc.Col if USE_DBC else html.Div)([html.Label("Δ CPIH (%)"),
+                    dcc.Slider(id="pct-cpih", min=-50, max=50, step=1, value=0,
+                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
+            ], className="g-2"),
+            (dbc.Row if USE_DBC else html.Div)([
+                (dbc.Col if USE_DBC else html.Div)([html.Label("Δ Unemployment (%)"),
+                    dcc.Slider(id="pct-unemp", min=-50, max=50, step=1, value=0,
+                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
+                (dbc.Col if USE_DBC else html.Div)([html.Label("Δ GDP (%)"),
+                    dcc.Slider(id="pct-gdp", min=-50, max=50, step=1, value=0,
+                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
+            ], className="g-2"),
+            (dbc.Row if USE_DBC else html.Div)([
+                (dbc.Col if USE_DBC else html.Div)([html.Label("Δ Yield Spread (%)"),
+                    dcc.Slider(id="pct-yield", min=-50, max=50, step=1, value=0,
+                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
+            ], className="g-2"),
+            html.Div(id="sim-pct-readout", className="mt-1 text-muted"),
+            dcc.Graph(id="sim-macro-graph"),
+            dcc.Graph(id="sim-micro-graph"),
+            html.Div(id="sim-risk-chips", className="mt-2"),
+            html.Hr(),
+            html.H5("Simulation Summary"),
+            html.H6("Current values"),
+            dash_table.DataTable(
+                id="sim-table",
+                columns=[], data=[],
+                style_table={"overflowX": "auto"},
+                style_cell={"padding":"8px","border":"1px solid #eee"},
+                style_header={"backgroundColor":"#f3f4f6","fontWeight":"bold"}
+            ),
+        ]),
+
+        # 4) Risk Overview (simple)
+        dcc.Tab(label="Risk Overview", value="tab-risk", children=[
+            dcc.Graph(id="risk-counts"),
+            dcc.Graph(id="risk-table-simple"),
+        ]),
+    ],
+)
+
+# ===== Layout (title only) =====
+app.layout = (dbc.Container if USE_DBC else html.Div)([
+    html.Div([ html.H2("UK Economic Crisis Simulator", className="mb-0") ], className="my-3"),
+    *( [top_banner] if top_banner else [] ),
+    dcc.Store(id="normalize-flag", storage_type="memory", data=False),  # permanently OFF
+    controls_block,
+    TABS
+], fluid=True)
 
 # =========================
 # ====== CALLBACKS ========
 # =========================
 
-@app.callback(Output("normalize-flag","data"), Input("normalize-toggle","value"))
-def set_norm(value):
-    return bool(value and "norm" in value)
+# ---- People Impact ----
+@app.callback(
+    Output("kpi-prob","children"),
+    Output("kpi-cpi","children"),
+    Output("kpi-un","children"),
+    Output("kpi-gdp","children"),
+    Output("people-cards","children"),
+    Output("people-story","children"),
+    Output("people-donut","figure"),
+    Input("risk-mode","value"),
+)
+def cb_people(mode):
+    if not DATA:
+        blank = (kpi_card("Crisis probability","—"),
+                 kpi_card("Inflation (CPIH)","—"),
+                 kpi_card("Unemployment","—"),
+                 kpi_card("GDP momentum","—"))
+        empty = go.Figure(); apply_bordered_style(empty)
+        return *blank, html.Div(), "Load data to view summary.", empty
 
+    info = people_impact_panel(DATA, mode)
+    k1 = kpi_card("Crisis probability (12m)", info["prob"], "Yield spread signal", color="danger")
+    k2 = kpi_card("Inflation (CPIH, y/y)", info["cpi"], f"~ {info['monthly_cost']} extra", color="warning")
+    k3 = kpi_card("Unemployment", info["un"], info["job_heat"], color="primary")
+    k4 = kpi_card("GDP momentum", info["gdp_mom"], "last few quarters", color="success")
+    tiles = [
+        info_badge(f"Cost of living: {info['monthly_cost']}", "#fff59d"),
+        info_badge(f"Job market: {info['job_heat']}", color_for_state_bg("Green") if "Cool" in info["job_heat"]
+                   else color_for_state_bg("Amber") if "Moderate" in info["job_heat"]
+                   else color_for_state_bg("Red")),
+        info_badge(f"Borrowing: {info['credit']}", color_for_state_bg({"Normal":"Green","Elevated":"Amber","High":"Red"}.get(info["credit"],"Unknown"))),
+    ]
+
+    def state_and_val(var):
+        dfv = _baseline_df(DATA, var, "Baseline")
+        bands = calibrate_bands_simple(DATA, var, mode)
+        val = latest_value(dfv, prefer_actual=True) if not dfv.empty else None
+        return classify_point(val, bands), val
+
+    col_state, col_val = state_and_val("CPIH") if "CPIH" in DATA else ("Unknown", None)
+    jobs_state, jobs_val = state_and_val("Unemployment") if "Unemployment" in DATA else ("Unknown", None)
+    credit_state = {"Normal":"Green","Elevated":"Amber","High":"Red"}.get(info["credit"], "Unknown")
+
+    labels = ["Cost of living (CPIH)", "Unemployment", "Credit Stress"]
+    states = [col_state, jobs_state, credit_state]
+    sev_weight = {"Green":1.0, "Amber":2.0, "Red":3.0, "Unknown":1.5}
+    values = [sev_weight.get(s,1.5) for s in states]
+    colors = [ {"Green":"#2e7d32","Amber":"#FFD700","Red":"#FF0000","Unknown":"#9e9e9e"}[s] for s in states ]
+
+    col_txt   = "—" if col_val is None else f"{col_val:.1f}%"
+    jobs_txt  = "—" if jobs_val is None else f"{jobs_val:.1f}%"
+    credit_txt = info["credit"]
+
+    customdata = [col_txt, jobs_txt, credit_txt]
+    hover = [
+        f"Cost of living (CPIH) — {col_state}<br>CPIH: {col_txt}<br>~{info['monthly_cost']} extra",
+        f"Unemployment — {jobs_state}<br>Unemployment: {jobs_txt}<br>{info['job_heat']}",
+        f"Credit Stress — {credit_state}<br>Status: {credit_txt}",
+    ]
+
+    donut = go.Figure(data=[
+        go.Pie(labels=labels, values=values, hole=0.55,
+               marker=dict(colors=colors, line=dict(color="white", width=1)),
+               customdata=customdata, texttemplate="%{label}<br><b>%{customdata}</b>",
+               textposition="inside", insidetextorientation="radial", textfont=dict(size=14),
+               hovertext=hover, hoverinfo="text", showlegend=True)
+    ])
+    donut.update_layout(title="Current impact", paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
+    return k1, k2, k3, k4, tiles, info["story"], donut
+
+# Indicators: dropdown sync
 @app.callback(Output("macro-scn","options"), Output("macro-scn","value"), Input("macro-var","value"))
 def sync_macro_scn(var):
-    scns = (VAR_SCENARIOS.get(var, []) if var else []) or avail_scn_all or ["Baseline"]
-    return [{"label": s, "value": s} for s in scns], scns[0]
+    scns=(VAR_SCENARIOS.get(var,[]) if var else []) or avail_scn_all or ["Baseline"]
+    return [{"label":s,"value":s} for s in scns], scns[0]
 
 @app.callback(Output("micro-scn","options"), Output("micro-scn","value"), Input("micro-var","value"))
 def sync_micro_scn(var):
-    scns = (VAR_SCENARIOS.get(var, []) if var else []) or avail_scn_all or ["Baseline"]
-    return [{"label": s, "value": s} for s in scns], scns[0]
+    scns=(VAR_SCENARIOS.get(var,[]) if var else []) or avail_scn_all or ["Baseline"]
+    return [{"label":s,"value":s} for s in scns], scns[0]
 
-@app.callback(Output("sim-scn","options"), Output("sim-scn","value"), Input("sim-micro-var","value"))
-def sync_sim_scn(micro_var):
-    macro_sets = [set(VAR_SCENARIOS.get(m, [])) for m in MACROS if m in VAR_SCENARIOS]
-    sets = macro_sets + ([set(VAR_SCENARIOS.get(micro_var, []))] if micro_var in VAR_SCENARIOS else [])
-    inter = set.intersection(*sets) if sets else set()
-    scns = sorted(inter) or (VAR_SCENARIOS.get(micro_var, []) if micro_var in VAR_SCENARIOS else avail_scn_all) or ["Baseline"]
-    return [{"label": s, "value": s} for s in scns], scns[0]
+def _add_threshold_lines(fig: go.Figure, df: pd.DataFrame, bands: Dict[str,float], norm_on: bool, row=None):
+    if not bands: return
+    base0 = None
+    if norm_on and "Forecast" in df.columns:
+        f = pd.to_numeric(df["Forecast"], errors="coerce").dropna()
+        base0 = f.iloc[0] if len(f) else None
+    def maybe_norm(val):
+        if val is None: return None
+        if norm_on and base0 is not None and base0 != 0:
+            return float(val) / float(base0) * 100.0
+        return float(val)
+    amber = maybe_norm(bands.get("amber")); red = maybe_norm(bands.get("red"))
+    x0 = df["Quarter"].min(); x1 = df["Quarter"].max()
+    if amber is not None:
+        if row:
+            fig.add_shape(type="line", x0=x0, x1=x1, y0=amber, y1=amber, line=dict(dash="dot", width=1, color="#FFD700"), row=row, col=1)
+            fig.add_annotation(x=x1, y=amber, text="Amber", showarrow=False, yshift=6, xanchor="right",
+                               font=dict(size=10, color="#FFD700"), row=row, col=1)
+        else:
+            fig.add_shape(type="line", x0=x0, x1=x1, y0=amber, y1=amber, line=dict(dash="dot", width=1, color="#FFD700"))
+            fig.add_annotation(x=x1, y=amber, text="Amber", showarrow=False, yshift=6, xanchor="right",
+                               font=dict(size=10, color="#FFD700"))
+    if red is not None:
+        if row:
+            fig.add_shape(type="line", x0=x0, x1=x1, y0=red, y1=red, line=dict(dash="dash", width=1, color="#FF0000"), row=row, col=1)
+            fig.add_annotation(x=x1, y=red, text="Red", showarrow=False, yshift=-10, xanchor="right",
+                               font=dict(size=10, color="#FF0000"), row=row, col=1)
+        else:
+            fig.add_shape(type="line", x0=x0, x1=x1, y0=red, y1=red, line=dict(dash="dash", width=1, color="#FF0000"))
+            fig.add_annotation(x=x1, y=red, text="Red", showarrow=False, yshift=-10, xanchor="right",
+                               font=dict(size=10, color="#FF0000"))
 
-# Macro tab
+# Indicators plots
 @app.callback(
     Output("macro-graph","figure"),
-    Output("macro-warning","children"),
-    Output("macro-model-meta","children"),
-    Output("macro-rel-card","children"),
-    Input("macro-var","value"),
-    Input("macro-scn","value"),
-    Input("normalize-flag","data")
+    Output("macro-risk-chip","children"),
+    Input("macro-var","value"), Input("macro-scn","value"),
+    Input("normalize-flag","data"), Input("risk-mode","value"),
 )
-def cb_macro(var, scn, norm_on):
-    if not var or var not in DATA: return go.Figure(), "", "", ""
-    df_all = DATA[var]
-    use_scn = scn if scenario_exists_for_var(var, scn, VAR_SCENARIOS) else (VAR_SCENARIOS.get(var, ["Baseline"])[0])
-    fallback_note = "" if use_scn == scn else f"(Using {use_scn}; '{scn}' not available for {var}.) "
-    df = df_all[df_all["Scenario"] == use_scn].copy().sort_values("Quarter")
+def cb_macro(var, scn, norm_on, mode):
+    fig=go.Figure()
+    if not var or var not in DATA:
+        apply_bordered_style(fig); return fig, ""
+    df_all=DATA[var]
+    use_scn=scn if scenario_exists_for_var(var, scn, VAR_SCENARIOS) else (VAR_SCENARIOS.get(var,["Baseline"])[0])
+    df=df_all[df_all["Scenario"]==use_scn].copy().sort_values("Quarter")
+    bands=calibrate_bands_simple(DATA, var, mode)
 
-    fig = go.Figure()
     if "Actual" in df.columns and df["Actual"].notna().any():
-        yA = to_index_100_safe(df["Actual"]) if norm_on else df["Actual"]
+        yA=to_index_100_safe(df["Actual"]) if norm_on else df["Actual"]
         fig.add_trace(go.Scatter(x=df["Quarter"], y=yA, mode="lines", name="Actual"))
-
     if df["Forecast"].notna().any():
-        yF = to_index_100_safe(df["Forecast"]) if norm_on else df["Forecast"]
-        fig.add_trace(go.Scatter(x=df["Quarter"], y=yF, mode="lines",
-                                 line=dict(dash="dash", width=2), name=f"Forecast · {use_scn}"))
+        yF=to_index_100_safe(df["Forecast"]) if norm_on else df["Forecast"]
+        fig.add_trace(go.Scatter(x=df["Quarter"], y=yF, mode="lines", line=dict(dash="dash"), name=f"Forecast · {use_scn}"))
         add_ci_band(fig, df, norm_on)
 
-    add_hist_forecast_divider(fig, df)
-    add_crisis_bands(fig, df)
-    # Global historical crisis shading
-    add_global_crisis_bands(fig)
+    _add_threshold_lines(fig, df, bands, norm_on)
+    add_hist_forecast_divider(fig, df); add_global_crisis_bands(fig); add_crisis_legend(fig)
+    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified", xaxis_title="Quarter")
+    apply_bordered_style(fig)
 
-    fig.update_xaxes(type="date"); fig.update_layout(title=f"{var} · {use_scn}", xaxis_title="Quarter", hovermode="x unified")
+    latest = latest_value(df, prefer_actual=False)
+    state = classify_point(latest, bands)
+    chip = info_badge(f"{var}: {state}", color_for_state_bg(state))
+    return fig, chip
 
-    warn = fallback_note
-    thr = THRESHOLDS.get(var)
-    if thr is not None and df["Forecast"].notna().any() and not norm_on:
-        add_threshold_line(fig, thr, df["Quarter"].min(), df["Quarter"].max())
-        add_crisis_markers(fig, df["Quarter"], df["Forecast"], thr)
-        m = crisis_mask(df["Forecast"], thr)
-        if m.any():
-            direction = ">" if thr >= 0 else "<"
-            warn += f"⚠️ {var} crosses threshold ({direction} {thr}) at {m.sum()} point(s)."
-
-    note_ident = scenario_identical_note(var, use_scn, DATA)
-    if note_ident:
-        warn += " " + note_ident
-
-    return fig, warn, model_badge_text(var), relationship_table(var)
-
-# Micro tab
 @app.callback(
     Output("micro-graph","figure"),
-    Output("micro-model-meta","children"),
-    Output("micro-rel-card","children"),
-    Input("micro-var","value"),
-    Input("micro-scn","value"),
-    Input("normalize-flag","data")
+    Input("micro-var","value"), Input("micro-scn","value"),
+    Input("normalize-flag","data"), Input("risk-mode","value"),
 )
-def cb_micro(var, scn, norm_on):
-    if not var or var not in DATA: return go.Figure(), "", ""
-    df_all = DATA[var]
-    use_scn = scn if scenario_exists_for_var(var, scn, VAR_SCENARIOS) else (VAR_SCENARIOS.get(var, ["Baseline"])[0])
-    df = df_all[df_all["Scenario"] == use_scn].copy().sort_values("Quarter")
+def cb_micro(var, scn, norm_on, mode):
+    fig=go.Figure()
+    if not var or var not in DATA:
+        apply_bordered_style(fig); return fig
+    df_all=DATA[var]; use_scn=scn if scenario_exists_for_var(var, scn, VAR_SCENARIOS) else (VAR_SCENARIOS.get(var,["Baseline"])[0])
+    df=df_all[df_all["Scenario"]==use_scn].copy().sort_values("Quarter")
+    bands=calibrate_bands_simple(DATA, var, mode)
 
-    fig = go.Figure()
     if "Actual" in df.columns and df["Actual"].notna().any():
-        yA = to_index_100_safe(df["Actual"]) if norm_on else df["Actual"]
+        yA=to_index_100_safe(df["Actual"]) if norm_on else df["Actual"]
         fig.add_trace(go.Scatter(x=df["Quarter"], y=yA, mode="lines", name="Actual"))
-
     if df["Forecast"].notna().any():
-        yF = to_index_100_safe(df["Forecast"]) if norm_on else df["Forecast"]
-        fig.add_trace(go.Scatter(x=df["Quarter"], y=yF, mode="lines",
-                                 line=dict(dash="dash", width=2), name=f"Forecast · {use_scn}"))
+        yF=to_index_100_safe(df["Forecast"]) if norm_on else df["Forecast"]
+        fig.add_trace(go.Scatter(x=df["Quarter"], y=yF, mode="lines", line=dict(dash="dash"), name=f"Forecast · {use_scn}"))
         add_ci_band(fig, df, norm_on)
 
-    add_hist_forecast_divider(fig, df)
-    add_crisis_bands(fig, df)
-    # Global historical crisis shading
-    add_global_crisis_bands(fig)
+    _add_threshold_lines(fig, df, bands, norm_on)
+    add_hist_forecast_divider(fig, df); add_global_crisis_bands(fig); add_crisis_legend(fig)
+    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified", xaxis_title="Quarter")
+    apply_bordered_style(fig)
+    return fig
 
-    fig.update_xaxes(type="date"); fig.update_layout(title=f"{var} · {use_scn}", xaxis_title="Quarter", hovermode="x unified")
-    return fig, model_badge_text(var), relationship_table(var)
+# Simulation: scenario sync
+@app.callback(Output("sim-scn","options"), Output("sim-scn","value"), Input("sim-micro-var","value"))
+def sync_sim_scn(micro_var):
+    macro_sets=[set(VAR_SCENARIOS.get(m,[])) for m in MACROS if m in VAR_SCENARIOS]
+    sets=macro_sets+([set(VAR_SCENARIOS.get(micro_var,[]))] if micro_var in VAR_SCENARIOS else [])
+    inter=set.intersection(*sets) if sets else set()
+    scns=sorted(inter) or (VAR_SCENARIOS.get(micro_var,[]) if micro_var in VAR_SCENARIOS else avail_scn_all) or ["Baseline"]
+    return [{"label":s,"value":s} for s in scns], scns[0]
 
-# Simulation
+# ====== Simulation main ======
 @app.callback(
+    Output("sim-overall-prob","children"),
     Output("sim-pct-readout","children"),
     Output("sim-macro-graph","figure"),
     Output("sim-micro-graph","figure"),
+    Output("sim-risk-chips","children"),
+    Output("sim-table","data"),
+    Output("sim-table","columns"),
     Input("sim-micro-var","value"),
     Input("sim-scn","value"),
     Input("normalize-flag","data"),
-    Input("pct-ccg","value"),
-    Input("pct-cpih","value"),
-    Input("pct-unemp","value"),
-    Input("pct-gdp","value"),
-    Input("pct-yield","value"),
+    Input("risk-mode","value"),
+    Input("preset-recession","n_clicks"),
+    Input("preset-recovery","n_clicks"),
+    Input("preset-infl","n_clicks"),
+    Input("pct-ccg","value"), Input("pct-cpih","value"),
+    Input("pct-unemp","value"), Input("pct-gdp","value"), Input("pct-yield","value"),
 )
-def cb_sim(micro_var, scn, norm_on, p_ccg, p_cpih, p_unemp, p_gdp, p_yield):
+def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp, s_yield):
+    try: trig_id = dash.ctx.triggered_id
+    except Exception:
+        trig_id = callback_context.triggered[0]['prop_id'].split('.')[0] if callback_context.triggered else None
+
+    if trig_id == "preset-recession":
+        s_ccg, s_cpih, s_un, s_gdp, s_yield = -10, +10, +25, -15, -40
+    elif trig_id == "preset-recovery":
+        s_ccg, s_cpih, s_un, s_gdp, s_yield = +5, -10, -15, +12, +20
+    elif trig_id == "preset-infl":
+        s_ccg, s_cpih, s_un, s_gdp, s_yield = +12, +20, +5, -5, -10
+
     if not micro_var or not scn or not DATA:
-        return "", go.Figure(), go.Figure()
+        empty = kpi_card("Overall crisis probability (12m)", "—", "based on adjusted macros", color="danger")
+        return empty, "", go.Figure(), go.Figure(), [], [], []
 
-    present_macros = [m for m in MACROS if m in DATA]
-    inter_sets = [set(VAR_SCENARIOS.get(m, [])) for m in present_macros] + [set(VAR_SCENARIOS.get(micro_var, []))]
-    inter = set.intersection(*inter_sets) if inter_sets else set()
-    scn_use = scn if (not inter or scn in inter) else sorted(inter)[0]
+    present_macros=[m for m in MACROS if m in DATA]
+    inter_sets=[set(VAR_SCENARIOS.get(m,[])) for m in present_macros]+[set(VAR_SCENARIOS.get(micro_var,[]))]
+    inter=set.intersection(*inter_sets) if inter_sets else set()
+    scn_use=scn if (not inter or scn in inter) else sorted(inter)[0]
 
-    pct_map = {
-        "Credit Card Growth": p_ccg or 0,
-        "CPIH": p_cpih or 0,
-        "Unemployment": p_unemp or 0,
-        "GDP": p_gdp or 0,
-        "Yield Spread": p_yield or 0,
-    }
+    pct_map={"Credit Card Growth":s_ccg or 0,"CPIH":s_cpih or 0,"Unemployment":s_un or 0,"GDP":s_gdp or 0,"Yield Spread":s_yield or 0}
 
-    base_macros = {var: DATA[var][DATA[var]["Scenario"] == scn_use].copy().sort_values("Quarter")
-                   for var in present_macros}
-    adj_macros = macro_adjusted_series(DATA, scn_use, pct_map)
+    base_macros={var: DATA[var][DATA[var]["Scenario"]==scn_use].copy().sort_values("Quarter") for var in present_macros}
+    adj_macros=macro_adjusted_series(DATA, scn_use, pct_map)
+    micro_adj = micro_adjusted_series(DATA, scn_use, adj_macros)
 
-    # --- Macro subplots (all macros) ---
-    rows_n = len(present_macros) if present_macros else 1
-    macro_fig = make_subplots(rows=rows_n, cols=1, shared_xaxes=True,
-                              subplot_titles=present_macros, vertical_spacing=0.06)
+    # Overall crisis probability KPI
+    overall_p = overall_crisis_prob_from_adj(DATA, adj_macros, mode)
+    prob_card = kpi_card("Overall crisis probability (12m)", "—" if overall_p is None else f"{overall_p*100:.0f}%", "based on adjusted macros", color="danger")
 
-    for i, var in enumerate(present_macros, start=1):
-        dfm_base = base_macros.get(var, pd.DataFrame())
-        dfm_adj = adj_macros.get(var, pd.DataFrame())
-        if dfm_base.empty:
-            continue
+    rows_n=len(present_macros) if present_macros else 1
+    macro_fig=make_subplots(rows=rows_n, cols=1, shared_xaxes=True, subplot_titles=present_macros, vertical_spacing=0.06)
+    chips=[]
+
+    for i,var in enumerate(present_macros, start=1):
+        dfb=base_macros.get(var, pd.DataFrame()); dfa=adj_macros.get(var, pd.DataFrame())
+        if dfb.empty: continue
+        bands = calibrate_bands_simple(DATA, var, mode)
 
         # Actual
-        if "Actual" in dfm_base.columns and dfm_base["Actual"].notna().any():
-            yA = to_index_100_safe(dfm_base["Actual"]) if norm_on else dfm_base["Actual"]
-            macro_fig.add_trace(go.Scatter(x=dfm_base["Quarter"], y=yA, mode="lines", name="Actual",
-                                           showlegend=(i == 1)), row=i, col=1)
+        if "Actual" in dfb.columns and dfb["Actual"].notna().any():
+            yA=to_index_100_safe(dfb["Actual"]) if norm_on else dfb["Actual"]
+            macro_fig.add_trace(go.Scatter(x=dfb["Quarter"], y=yA, mode="lines", name="Actual", showlegend=(i==1)), row=i, col=1)
 
-        # Base forecast
-        baseF = dfm_base["Forecast"]
-        common_base = baseF[baseF.notna()].iloc[0] if baseF.notna().any() else np.nan
+        # Baseline forecast + CI
+        baseF=pd.to_numeric(dfb["Forecast"], errors="coerce")
+        base0=baseF.dropna().iloc[0] if baseF.notna().any() else np.nan
         if baseF.notna().any():
-            yF = to_index_100_relative(baseF, common_base) if norm_on else baseF
-            macro_fig.add_trace(go.Scatter(x=dfm_base["Quarter"], y=yF, mode="lines",
-                                           line=dict(dash="dot", width=2),
-                                           name=f"Forecast · {scn_use} (Base)", showlegend=(i == 1)), row=i, col=1)
-            add_ci_band(macro_fig, dfm_base, norm_on, row=i, col=1)
+            yF=to_index_100_relative(baseF, base0) if norm_on else baseF
+            macro_fig.add_trace(go.Scatter(x=dfb["Quarter"], y=yF, mode="lines", line=dict(dash="dot"), name=f"Forecast · {scn_use}", showlegend=(i==1)), row=i, col=1)
+            add_ci_band(macro_fig, dfb, norm_on, row=i, col=1)
 
-        # Adjusted forecast — show ONLY from forecast start onwards
-        adjF = dfm_adj.get("Adj Forecast", dfm_adj.get("Forecast", pd.Series(index=dfm_base.index, dtype=float)))
+        # Adjusted forecast
+        adjF=dfa.get("Adj Forecast", dfa.get("Forecast"))
         if adjF is not None and pd.Series(adjF).notna().any() and baseF.notna().any():
+            fidx=baseF.first_valid_index()
+            if fidx is not None:
+                fdate=dfb.loc[fidx,"Quarter"]; mask=dfa["Quarter"]>=fdate
+                yAdj_full=to_index_100_relative(adjF, base0) if norm_on else adjF
+                yAdj_ser=pd.Series(yAdj_full, index=dfa.index)
+                macro_fig.add_trace(go.Scatter(x=dfa.loc[mask,"Quarter"], y=yAdj_ser.loc[mask], mode="lines", name="Adjusted", showlegend=(i==1)), row=i,col=1)
+
+        _add_threshold_lines(macro_fig, dfb, bands, norm_on, row=i)
+        add_hist_forecast_divider(macro_fig, dfb, row=i, col=1); add_global_crisis_bands(macro_fig, row=i, col=1)
+
+        # chips
+        tail = pd.to_numeric(pd.Series(adjF), errors="coerce").dropna().tail(2) if adjF is not None else pd.Series([], dtype=float)
+        st="Unknown"
+        if len(tail):
+            b=calibrate_bands_simple(DATA, var, mode); sts=[classify_point(v, b) for v in tail]
+            st="Red" if all(s=="Red" for s in sts) else ("Amber" if any(s in("Amber","Red") for s in sts) else "Green")
+        chips.append(info_badge(f"{var}: {st}", color_for_state_bg(st)))
+
+    add_crisis_legend(macro_fig)
+    macro_fig.update_layout(title=f"Simulation — {scn_use}", hovermode="x unified", height=220*rows_n)
+    apply_bordered_style(macro_fig)
+
+    # Micro figure
+    df_micro_base=DATA[micro_var][DATA[micro_var]["Scenario"]==scn_use].copy().sort_values("Quarter")
+    df_micro_adj = micro_adj.get(micro_var, pd.DataFrame())
+    micro_fig=go.Figure()
+    if not df_micro_base.empty:
+        mb = df_micro_base
+        bands_m = calibrate_bands_simple(DATA, micro_var, mode)
+
+        if "Actual" in mb.columns and mb["Actual"].notna().any():
+            yA=to_index_100_safe(mb["Actual"]) if norm_on else mb["Actual"]
+            micro_fig.add_trace(go.Scatter(x=mb["Quarter"], y=yA, mode="lines", name="Actual"))
+
+        baseF=pd.to_numeric(mb["Forecast"], errors="coerce")
+        base0=baseF.dropna().iloc[0] if baseF.notna().any() else np.nan
+        if baseF.notna().any():
+            yF=to_index_100_relative(baseF, base0) if norm_on else baseF
+            micro_fig.add_trace(go.Scatter(x=mb["Quarter"], y=yF, mode="lines", line=dict(dash="dot"), name=f"Forecast · {scn_use}"))
+            add_ci_band(micro_fig, mb, norm_on)
+
+        if not df_micro_adj.empty:
+            adjF = pd.to_numeric(df_micro_adj["Adj Forecast"], errors="coerce")
+            yAdj = to_index_100_relative(adjF, base0) if norm_on else adjF
             fidx = baseF.first_valid_index()
             if fidx is not None:
-                fdate = dfm_base.loc[fidx, "Quarter"]
-                adj_mask = dfm_adj["Quarter"] >= fdate
+                fdate = mb.loc[fidx, "Quarter"]; mask = df_micro_adj["Quarter"] >= fdate
+                micro_fig.add_trace(go.Scatter(x=df_micro_adj.loc[mask,"Quarter"], y=pd.Series(yAdj, index=df_micro_adj.index).loc[mask], mode="lines", name="Adjusted"))
 
-                yAdj_full = to_index_100_relative(adjF, common_base) if norm_on else adjF
-                yAdj_ser = pd.Series(yAdj_full, index=dfm_adj.index)
-                x_adj = dfm_adj.loc[adj_mask, "Quarter"]
-                y_adj = yAdj_ser.loc[adj_mask]
+        _add_threshold_lines(micro_fig, mb, bands_m, norm_on)
+        add_hist_forecast_divider(micro_fig, mb); add_global_crisis_bands(micro_fig); add_crisis_legend(micro_fig)
+        micro_fig.update_layout(title=f"{micro_var} — simulation view", xaxis_title="Quarter", hovermode="x unified")
+        apply_bordered_style(micro_fig)
 
-                macro_fig.add_trace(go.Scatter(x=x_adj, y=y_adj, mode="lines",
-                                               line=dict(dash="solid", width=2),
-                                               name="Adjusted Forecast", showlegend=(i == 1)), row=i, col=1)
+    # "Current values" table
+    headers = ["Indicator","Latest Actual","Latest Forecast","Latest Adjusted","Amber thr.","Red thr."]
+    data_rows = []
+    for var in present_macros:
+        dfb = base_macros.get(var, pd.DataFrame()); dfa = adj_macros.get(var, pd.DataFrame())
+        latest_act = f"{pd.to_numeric(dfb['Actual'], errors='coerce').dropna().iloc[-1]:.2f}" if (not dfb.empty and "Actual" in dfb and dfb['Actual'].notna().any()) else "—"
+        latest_fc  = f"{pd.to_numeric(dfb['Forecast'], errors='coerce').dropna().iloc[-1]:.2f}" if (not dfb.empty and dfb['Forecast'].notna().any()) else "—"
+        latest_adj = f"{pd.to_numeric(dfa['Adj Forecast'], errors='coerce').dropna().iloc[-1]:.2f}" if (isinstance(dfa, pd.DataFrame) and "Adj Forecast" in dfa and pd.to_numeric(dfa['Adj Forecast'], errors='coerce').notna().any()) else "—"
+        bands = calibrate_bands_simple(DATA, var, mode)
+        amber = f"{bands['amber']:.2f}" if bands and 'amber' in bands else "—"
+        red   = f"{bands['red']:.2f}" if bands and 'red' in bands else "—"
+        data_rows.append({"Indicator":var, "Latest Actual":latest_act, "Latest Forecast":latest_fc,
+                          "Latest Adjusted":latest_adj, "Amber thr.":amber, "Red thr.":red})
+    columns = [{"name":h, "id":h} for h in headers]
 
-                # Threshold markers only in forecast zone
-                thr = THRESHOLDS.get(var)
-                if thr is not None and not norm_on and ("Adj Forecast" in dfm_adj.columns):
-                    add_threshold_line(macro_fig, thr, dfm_adj["Quarter"].min(), dfm_adj["Quarter"].max(), row=i, col=1)
-                    add_crisis_markers(macro_fig, x_adj, y_adj, thr, row=i, col=1)
+    rd=(f"Shocks → CardGrowth {pct_map['Credit Card Growth']}%, CPIH {pct_map['CPIH']}%, "
+        f"Unemp {pct_map['Unemployment']}%, GDP {pct_map['GDP']}%, YieldSpread {pct_map['Yield Spread']}%.")
 
-        add_hist_forecast_divider(macro_fig, dfm_base, row=i, col=1)
-        add_crisis_bands(macro_fig, dfm_base, row=i, col=1)
-        # Global historical crisis shading per subplot
-        add_global_crisis_bands(macro_fig, row=i, col=1)
+    return prob_card, rd, macro_fig, micro_fig, chips, data_rows, columns
 
-    macro_fig.update_xaxes(type="date")
-    macro_fig.update_layout(title=f"All Macros · Simulation ({scn_use})", hovermode="x unified", height=220 * rows_n)
+# --------- Risk Overview (simple; bordered) ----------
+@app.callback(
+    Output("risk-counts","figure"),
+    Output("risk-table-simple","figure"),
+    Input("risk-mode","value"),
+)
+def cb_risk_overview_simple(mode):
+    vars_all=[v for v in (MACROS+MICROS) if v in DATA]
+    latest_vals={}; state_map={}
+    for var in vars_all:
+        df=_baseline_df(DATA, var, "Baseline")
+        if df.empty:
+            state_map[var] = "Unknown"; latest_vals[var] = np.nan; continue
+        bands = calibrate_bands_simple(DATA, var, mode)
+        s = (pd.to_numeric(df["Actual"], errors="coerce") if "Actual" in df and df["Actual"].notna().any()
+             else pd.to_numeric(df["Forecast"], errors="coerce"))
+        last = s.dropna().iloc[-1] if s.dropna().size else np.nan
+        latest_vals[var]=last if pd.notna(last) else np.nan
+        state_map[var]=classify_point(last, bands)
 
-    # --- Micro reacts to macro deltas ---
-    df_micro_base = DATA[micro_var][DATA[micro_var]["Scenario"] == scn_use].copy().sort_values("Quarter")
-    df_micro_adj  = micro_adjusted_series(DATA, scn_use, micro_var, base_macros, adj_macros)
-    micro_fig = go.Figure()
+    cG = sum(1 for v in state_map.values() if v=="Green")
+    cA = sum(1 for v in state_map.values() if v=="Amber")
+    cR = sum(1 for v in state_map.values() if v=="Red")
+    counts = go.Figure()
+    counts.add_bar(x=["Now"], y=[cG], name="Green", marker_color="#2e7d32")
+    counts.add_bar(x=["Now"], y=[cA], name="Amber", marker_color="#FFD700")
+    counts.add_bar(x=["Now"], y=[cR], name="Red", marker_color="#FF0000")
+    counts.update_layout(barmode="stack", title="number of crisis indicators", showlegend=True, yaxis_title="Count")
+    apply_bordered_style(counts)
 
-    if not df_micro_base.empty:
-        # Actual
-        if "Actual" in df_micro_base.columns and df_micro_base["Actual"].notna().any():
-            yA = to_index_100_safe(df_micro_base["Actual"]) if norm_on else df_micro_base["Actual"]
-            micro_fig.add_trace(go.Scatter(x=df_micro_base["Quarter"], y=yA, mode="lines", name="Actual"))
+    order_key = {"Red":0, "Amber":1, "Green":2, "Unknown":3}
+    rows = []
+    for var in sorted(vars_all, key=lambda v: (order_key.get(state_map[v],3), v)):
+        bands = calibrate_bands_simple(DATA, var, mode)
+        amber = f"{bands['amber']:.2f}" if bands and 'amber' in bands else "—"
+        red   = f"{bands['red']:.2f}" if bands and 'red' in bands else "—"
+        latest = f"{latest_vals[var]:.2f}" if pd.notna(latest_vals[var]) else "—"
+        rows.append([var, state_map[var], latest, amber, red])
 
-        # Base forecast
-        baseF_mi = df_micro_base["Forecast"]
-        common_base_mi = baseF_mi[baseF_mi.notna()].iloc[0] if baseF_mi.notna().any() else np.nan
-        if baseF_mi.notna().any():
-            yF = to_index_100_relative(baseF_mi, common_base_mi) if norm_on else baseF_mi
-            micro_fig.add_trace(go.Scatter(x=df_micro_base["Quarter"], y=yF, mode="lines",
-                                           line=dict(dash="dot", width=2), name=f"Forecast · {scn_use} (Base)"))
-            add_ci_band(micro_fig, df_micro_base, norm_on)
-
-        # Adjusted forecast — ONLY from forecast start onwards
-        adjF_mi = df_micro_adj.get("Adj Forecast", df_micro_adj["Forecast"])
-        if pd.Series(adjF_mi).notna().any() and baseF_mi.notna().any():
-            fidx_mi = baseF_mi.first_valid_index()
-            if fidx_mi is not None:
-                fdate_mi = df_micro_base.loc[fidx_mi, "Quarter"]
-                adj_mask_mi = df_micro_adj["Quarter"] >= fdate_mi
-
-                yAdj_full_mi = to_index_100_relative(adjF_mi, common_base_mi) if norm_on else adjF_mi
-                yAdj_ser_mi = pd.Series(yAdj_full_mi, index=df_micro_adj.index)
-                x_adj_mi = df_micro_adj.loc[adj_mask_mi, "Quarter"]
-                y_adj_mi = yAdj_ser_mi.loc[adj_mask_mi]
-
-                micro_fig.add_trace(go.Scatter(x=x_adj_mi, y=y_adj_mi, mode="lines",
-                                               line=dict(dash="solid", width=2), name="Adjusted Forecast"))
-
-        add_hist_forecast_divider(micro_fig, df_micro_base)
-        add_crisis_bands(micro_fig, df_micro_base)
-        # Global historical crisis shading
-        add_global_crisis_bands(micro_fig)
-
-        micro_fig.update_xaxes(type="date")
-        micro_fig.update_layout(title=f"{micro_var} · Simulation impact", xaxis_title="Quarter", hovermode="x unified")
-
-    rd = (f"Applied % changes → "
-          f"Credit Card Growth: {pct_map['Credit Card Growth']}%, "
-          f"CPIH: {pct_map['CPIH']}%, "
-          f"Unemployment: {pct_map['Unemployment']}%, "
-          f"GDP: {pct_map['GDP']}%, "
-          f"Yield Spread: {pct_map['Yield Spread']}%.")
-
-    return rd, macro_fig, micro_fig
+    table = go.Figure(data=[go.Table(
+        header=dict(values=["Indicator","State","Latest","Amber thr.","Red thr."], fill_color="#f3f4f6"),
+        cells=dict(values=[list(col) for col in zip(*rows)])
+    )])
+    table.update_layout(title="current status (baseline)", paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
+    return counts, table
 
 # =========================
-# ====== MAIN (Render) ====
+# ====== RUN SERVER =======
 # =========================
 
 if __name__ == "__main__":
-    # Render provides $PORT; default to 8050 locally
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8050)), debug=False, use_reloader=False)
+    app.run(debug=True, port=int(os.environ.get("PORT", 8050)))
