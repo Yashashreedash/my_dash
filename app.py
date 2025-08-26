@@ -1,5 +1,5 @@
 # UK ECONOMIC CRISIS SIMULATOR — Normalise removed (always OFF)
-# Run: python app.py  → open http://127.0.0.1:8050
+# Run locally:  python app.py  → http://127.0.0.1:8052
 
 import os, re
 from pathlib import Path
@@ -460,7 +460,7 @@ def tidy_var_scenarios(data: Dict[str,pd.DataFrame])->Dict[str,List[str]]:
 def scenario_exists_for_var(var: str, scn: str, var_scenarios: Dict[str,List[str]])->bool:
     return scn in (var_scenarios.get(var) or [])
 
-# ======= Overall crisis prob (from adjusted macros) & contributions =======
+# ======= Overall crisis prob (from adjusted macros) =======
 def _ecdf_prob(s: pd.Series, v: float) -> Optional[float]:
     arr = np.sort(pd.to_numeric(s, errors="coerce").dropna().values)
     if len(arr)==0 or v is None or not np.isfinite(v): return None
@@ -500,44 +500,6 @@ def overall_crisis_prob_from_adj(DATA: Dict[str,pd.DataFrame], adj_macros: Dict[
     P = 1.0 - prod
     return float(min(max(P, 0.0), 1.0))
 
-def contribution_shares(DATA: Dict[str,pd.DataFrame], adj_macros: Dict[str,pd.DataFrame], mode: str) -> Dict[str,float]:
-    """Return % contribution shares by macro using base weights × current risk intensity."""
-    w_base = {"GDP":0.28, "Unemployment":0.28, "CPIH":0.20, "Yield Spread":0.18, "Credit Card Growth":0.06}
-    gamma_map = {"Early":0.85, "Balanced":1.0, "Conservative":1.25}
-    gamma = gamma_map.get(mode, 1.0)
-
-    scores = {}
-    for var in MACROS:
-        if var not in DATA: continue
-        df_hist = _baseline_df(DATA, var, "Baseline")
-        if df_hist.empty: continue
-        s_hist = _hist_series_for_bands(df_hist)
-
-        # current adjusted value
-        v = None
-        if var in adj_macros and "Adj Forecast" in adj_macros[var]:
-            vser = pd.to_numeric(adj_macros[var]["Adj Forecast"], errors="coerce").dropna()
-            v = float(vser.iloc[-1]) if len(vser) else None
-        if v is None:
-            dfb = DATA[var][DATA[var]["Scenario"]=="Baseline"].copy().sort_values("Quarter")
-            v = latest_value(dfb, prefer_actual=False)
-
-        F = _ecdf_prob(s_hist, v)
-        if F is None: 
-            continue
-        direction = calibrate_bands_simple(DATA, var, mode).get("direction","upper")
-        intensity = F if direction == "upper" else (1.0 - F)         # 0..1 badness percentile
-        intensity = min(max(intensity,0.0),1.0) ** gamma
-
-        scores[var] = w_base.get(var, 0.1) * float(intensity)
-
-    if not scores:
-        return {}
-    total = sum(scores.values())
-    if total <= 0:
-        return {k: 0.0 for k in scores}
-    return {k: 100.0 * v / total for k, v in scores.items()}
-
 # =========================
 # ====== LOAD DATA ========
 # =========================
@@ -561,51 +523,19 @@ scenario_opts_global=[{"label":s,"value":s} for s in (avail_scn_all or ["Baselin
 
 external_stylesheets = [dbc.themes.LUX] if USE_DBC else []
 app = Dash(__name__, external_stylesheets=external_stylesheets)
-app.title = "UK Economic Crisis Simulator"
+server = app.server  # <- expose WSGI callable for gunicorn
 
-# --- green sliders CSS scoped to #sim-sliders ---
-app.index_string = """
-<!DOCTYPE html>
-<html>
-    <head>
-        {%metas%}
-        <title>{%title%}</title>
-        {%favicon%}
-        {%css%}
-        <style>
-            /* Scope to the simulation slider container */
-            #sim-sliders .rc-slider-track { background-color: #2e7d32 !important; }
-            #sim-sliders .rc-slider-handle { border-color: #2e7d32 !important; }
-            #sim-sliders .rc-slider-dot-active { border-color: #2e7d32 !important; }
-        </style>
-    </head>
-    <body>
-        {%app_entry%}
-        <footer>
-            {%config%}
-            {%scripts%}
-            {%renderer%}
-        </footer>
-    </body>
-</html>
-"""
-
-# ---- small wrappers so we never pass width= to html.Div ----
+# safe Row/Col wrappers (no width kw for plain Div)
 def Row(children=None, **kwargs):
-    return dbc.Row(children, **kwargs) if USE_DBC else html.Div(children, **kwargs)
+    if USE_DBC:
+        return dbc.Row(children, **kwargs)
+    return html.Div(children, **kwargs)
 
 def Col(children=None, width=None, **kwargs):
     if USE_DBC:
         return dbc.Col(children, width=width, **kwargs)
-    # approximate column width with style when not using dbc
-    style = kwargs.pop("style", {})
-    if width:
-        pct = int(round(width/12*100))
-        style = {**style, "flex": f"0 0 {pct}%", "maxWidth": f"{pct}%"}
-    return html.Div(children, style=style, **kwargs)
-
-def Card(children=None, **kwargs):
-    return dbc.Card(dbc.CardBody(children), **kwargs) if USE_DBC else html.Div(children, style={"padding":"10px","background":"#fff","border":"1px solid #eee","borderRadius":"10px","boxShadow":"0 1px 5px rgba(0,0,0,0.05)"})
+    # strip bootstrap-only props
+    return html.Div(children, **{k: v for k, v in kwargs.items() if k != "width"})
 
 def kpi_card(title, value, sub=None, color="primary"):
     if USE_DBC:
@@ -642,20 +572,25 @@ top_banner = (dbc.Alert(LOAD_ERROR, color="danger", className="mb-2") if USE_DBC
               html.Div(LOAD_ERROR, style={"background":"#ffecec","border":"1px solid #ffb3b3","padding":"8px 12px","borderRadius":"8px","color":"#b30000","marginBottom":"10px"})) if LOAD_ERROR else None
 
 # ---- Controls (ONLY risk sensitivity now) ----
-controls_block = Card([
-    html.Div([
-        html.Label("Risk sensitivity"),
-        dcc.RadioItems(
-            id="risk-mode",
-            options=[
-                {"label":" Early (more alerts)  q≈0.80","value":"Early"},
-                {"label":" Balanced  q≈0.85","value":"Balanced"},
-                {"label":" Conservative (fewer alerts)  q≈0.95","value":"Conservative"},
-            ],
-            value="Balanced", inline=False
-        )
-    ]),
-], className="shadow-sm")
+controls_block = (
+    (dbc.Card if USE_DBC else html.Div)(
+        (dbc.CardBody if USE_DBC else lambda x: html.Div(x, style={"padding":"10px"}))([
+            html.Div([
+                html.Label("Risk sensitivity"),
+                dcc.RadioItems(
+                    id="risk-mode",
+                    options=[
+                        {"label":" Early (more alerts)  q≈0.80","value":"Early"},
+                        {"label":" Balanced  q≈0.85","value":"Balanced"},
+                        {"label":" Conservative (fewer alerts)  q≈0.95","value":"Conservative"},
+                    ],
+                    value="Balanced", inline=False
+                )
+            ]),
+        ]),
+        className="shadow-sm"
+    )
+)
 
 # --- Tabs layout ---
 TABS = dcc.Tabs(
@@ -668,12 +603,17 @@ TABS = dcc.Tabs(
                 Col(id="kpi-un",   width=3),
                 Col(id="kpi-gdp",  width=3),
             ], className="g-3 my-1"),
-            html.Div([dcc.Graph(id="people-donut")], style={"maxWidth":"720px","margin":"0 auto"}),
+            html.Div([dcc.Graph(id="people-donut")]),
             Row([
                 Col([html.H5("Current Situation"), html.Div(id="people-cards")], width=6),
                 Col([
                     html.H5("overview"),
-                    Card([html.Div(id="people-story", style={"fontSize": "14px"})], className="shadow-sm"),
+                    (dbc.Card if USE_DBC else html.Div)(
+                        (dbc.CardBody if USE_DBC else lambda x: html.Div(x, style={"padding": "14px"}))(
+                            [html.Div(id="people-story", style={"fontSize": "14px"})]
+                        ),
+                        className="shadow-sm",
+                    ),
                 ], width=6),
             ], className="g-3 my-1"),
         ]),
@@ -710,13 +650,9 @@ TABS = dcc.Tabs(
         dcc.Tab(label="Simulation", value="tab-sim", children=[
             scenario_preset_buttons(),
             html.Div(id="sim-overall-prob", className="my-2"),
-            # Donut FIRST, centered & large
-            html.Div(
-                dcc.Graph(id="sim-donut"),
-                style={"maxWidth":"740px","margin":"0 auto"}
-            ),
-            html.Div(id="sim-analyst-line", className="my-2", style={"fontWeight":"500"}),
-
+            # large centred donut
+            html.Div(dcc.Graph(id="sim-donut"), style={"maxWidth":"980px","margin":"0 auto"}),
+            html.Div(id="sim-analyst-line", className="my-2", style={"fontWeight":"500","textAlign":"center"}),
             Row([
                 Col([
                     html.Label("View Micro (RSI)"),
@@ -727,32 +663,28 @@ TABS = dcc.Tabs(
                     dcc.Dropdown(id="sim-scn", options=scenario_opts_global, value=scenario_opts_global[0]["value"])
                 ], width=3),
             ], className="g-2"),
-
-            html.Div(id="sim-sliders", children=[
-                Row([
-                    Col([html.Label("Δ Credit Card Growth (%)"),
-                        dcc.Slider(id="pct-ccg", min=-50, max=50, step=1, value=0,
-                                   marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
-                    Col([html.Label("Δ CPIH (%)"),
-                        dcc.Slider(id="pct-cpih", min=-50, max=50, step=1, value=0,
-                                   marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
-                ], className="g-2"),
-                Row([
-                    Col([html.Label("Δ Unemployment (%)"),
-                        dcc.Slider(id="pct-unemp", min=-50, max=50, step=1, value=0,
-                                   marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
-                    Col([html.Label("Δ GDP (%)"),
-                        dcc.Slider(id="pct-gdp", min=-50, max=50, step=1, value=0,
-                                   marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
-                ], className="g-2"),
-                Row([
-                    Col([html.Label("Δ Yield Spread (%)"),
-                        dcc.Slider(id="pct-yield", min=-50, max=50, step=1, value=0,
-                                   marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
-                ], className="g-2"),
-            ]),
-
-            html.Div(id="sim-pct-readout", className="mt-1 text-muted"),
+            Row([
+                Col([html.Label("Δ Credit Card Growth (%)"),
+                    dcc.Slider(id="pct-ccg", min=-50, max=50, step=1, value=0,
+                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
+                Col([html.Label("Δ CPIH (%)"),
+                    dcc.Slider(id="pct-cpih", min=-50, max=50, step=1, value=0,
+                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
+            ], className="g-2"),
+            Row([
+                Col([html.Label("Δ Unemployment (%)"),
+                    dcc.Slider(id="pct-unemp", min=-50, max=50, step=1, value=0,
+                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
+                Col([html.Label("Δ GDP (%)"),
+                    dcc.Slider(id="pct-gdp", min=-50, max=50, step=1, value=0,
+                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
+            ], className="g-2"),
+            Row([
+                Col([html.Label("Δ Yield Spread (%)"),
+                    dcc.Slider(id="pct-yield", min=-50, max=50, step=1, value=0,
+                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})], width=6),
+            ], className="g-2"),
+            html.Div(id="sim-pct-readout", className="mt-1 text-muted", style={"textAlign":"center"}),
             dcc.Graph(id="sim-macro-graph"),
             dcc.Graph(id="sim-micro-graph"),
             html.Div(id="sim-risk-chips", className="mt-2"),
@@ -813,10 +745,8 @@ def cb_people(mode):
     k2 = kpi_card("Inflation (CPIH, y/y)", info["cpi"], f"~ {info['monthly_cost']} extra", color="warning")
     k3 = kpi_card("Unemployment", info["un"], info["job_heat"], color="primary")
     k4 = kpi_card("GDP momentum", info["gdp_mom"], "last few quarters", color="success")
-
-    # tile text: "Cost of living: £…/mo extra"
     tiles = [
-        info_badge(f"Cost of living: {info['monthly_cost']} extra", "#fff59d"),
+        info_badge(f"Cost of living: {info['monthly_cost']} extra", "#fff59d"),   # <- changed
         info_badge(f"Job market: {info['job_heat']}", color_for_state_bg("Green") if "Cool" in info["job_heat"]
                    else color_for_state_bg("Amber") if "Moderate" in info["job_heat"]
                    else color_for_state_bg("Red")),
@@ -857,8 +787,7 @@ def cb_people(mode):
                textposition="inside", insidetextorientation="radial", textfont=dict(size=14),
                hovertext=hover, hoverinfo="text", showlegend=True)
     ])
-    donut.update_layout(title="Current impact", paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", height=380)
-    apply_bordered_style(donut)
+    donut.update_layout(title="Current impact", paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
     return k1, k2, k3, k4, tiles, info["story"], donut
 
 # Indicators: dropdown sync
@@ -982,7 +911,6 @@ def sync_sim_scn(micro_var):
 # ------- helper: build analyst one-liner -------
 def build_analyst_line(micro_var: str, mode: str, df_micro_base: pd.DataFrame, df_micro_adj: pd.DataFrame, overall_p: Optional[float]) -> str:
     p_str = "—" if overall_p is None else f"{overall_p*100:.0f}%"
-    # choose series for value / trend
     series_for_trend = None
     if isinstance(df_micro_adj, pd.DataFrame) and "Adj Forecast" in df_micro_adj:
         series_for_trend = pd.to_numeric(df_micro_adj["Adj Forecast"], errors="coerce")
@@ -997,7 +925,6 @@ def build_analyst_line(micro_var: str, mode: str, df_micro_base: pd.DataFrame, d
         d = s.iloc[-1] - s.iloc[-2]
         trend = "rising" if d > 0 else ("falling" if d < 0 else "flat")
 
-    # current value for state/distance
     if isinstance(df_micro_adj, pd.DataFrame) and "Adj Forecast" in df_micro_adj:
         v = pd.to_numeric(df_micro_adj["Adj Forecast"], errors="coerce").dropna()
         v = float(v.iloc[-1]) if len(v) else None
@@ -1038,7 +965,7 @@ def build_analyst_line(micro_var: str, mode: str, df_micro_base: pd.DataFrame, d
     else:
         return f"At {p_str} 12-m crisis odds, {micro_var} is {trend} (status: {state})."
 
-# Simulation main
+# Simulation main (includes donut)
 @app.callback(
     Output("sim-overall-prob","children"),
     Output("sim-donut","figure"),
@@ -1073,8 +1000,7 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
 
     if not micro_var or not scn or not DATA:
         empty = kpi_card("Overall crisis probability (12m)", "—", "based on adjusted macros", color="danger")
-        empty_donut = go.Figure(); apply_bordered_style(empty_donut)
-        return empty, empty_donut, "", "", go.Figure(), go.Figure(), [], [], []
+        return empty, go.Figure(), "", "", go.Figure(), go.Figure(), [], [], []
 
     present_macros=[m for m in MACROS if m in DATA]
     inter_sets=[set(VAR_SCENARIOS.get(m,[])) for m in present_macros]+[set(VAR_SCENARIOS.get(micro_var,[]))]
@@ -1087,48 +1013,62 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
     adj_macros=macro_adjusted_series(DATA, scn_use, pct_map)
     micro_adj = micro_adjusted_series(DATA, scn_use, adj_macros)
 
+    # Overall probability
     overall_p = overall_crisis_prob_from_adj(DATA, adj_macros, mode)
     prob_card = kpi_card("Overall crisis probability (12m)", "—" if overall_p is None else f"{overall_p*100:.0f}%", "based on adjusted macros", color="danger")
 
-    # ----- Donut (Approximate Risk Factor) -----
-    shares = contribution_shares(DATA, adj_macros, mode)
-    if shares:
-        labels = list(shares.keys())
-        vals   = list(shares.values())
+    # ----- Donut: approximate risk factor (legend right, big, centered)
+    # compute weighted contributions similar to overall prob
+    w_base = {"GDP":0.28, "Unemployment":0.28, "CPIH":0.20, "Yield Spread":0.18, "Credit Card Growth":0.06}
+    gamma_map = {"Early":0.85, "Balanced":1.0, "Conservative":1.25}
+    gamma = gamma_map.get(mode, 1.0)
+
+    contrib = {}
+    for var in present_macros:
+        df_hist = _baseline_df(DATA, var, "Baseline")
+        if df_hist.empty: continue
+        s_hist = _hist_series_for_bands(df_hist)
+
+        # value under adjustment
+        v = None
+        if var in adj_macros and "Adj Forecast" in adj_macros[var]:
+            v = pd.to_numeric(adj_macros[var]["Adj Forecast"], errors="coerce").dropna()
+            v = float(v.iloc[-1]) if len(v) else None
+        if v is None:
+            dfb = DATA[var][DATA[var]["Scenario"]==scn_use].copy().sort_values("Quarter")
+            v = latest_value(dfb, prefer_actual=False)
+
+        arr = np.sort(pd.to_numeric(s_hist, errors="coerce").dropna().values)
+        if len(arr)==0 or v is None or not np.isfinite(v): 
+            continue
+        F = np.searchsorted(arr, v, side="right") / len(arr)
+        direction = calibrate_bands_simple(DATA, var, mode).get("direction","upper")
+        p_i = F if direction=="upper" else (1.0 - F)
+        p_i = min(max(p_i, 0.0), 1.0) ** gamma
+        contrib[var] = w_base.get(var, 0.1) * p_i
+
+    if not contrib:
+        sim_donut = go.Figure()
     else:
-        labels = present_macros
-        vals   = [100/len(labels)]*len(labels) if labels else []
+        # normalise to percentages
+        total = sum(contrib.values())
+        labels = list(contrib.keys())
+        values = [100.0 * v / total for v in contrib.values()]
+        sim_donut = go.Figure(data=[
+            go.Pie(labels=labels, values=values, hole=0.60,
+                   textinfo="label+percent", textposition="inside",
+                   hovertemplate="%{label}: %{value:.1f}%", sort=False,
+                   showlegend=True)
+        ])
+        sim_donut.update_layout(
+            title="Approximate Risk Factor",
+            paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
+            legend=dict(orientation="v", x=1.02, y=1),
+            margin=dict(t=60, l=40, r=180, b=40),  # leave room for right legend
+            height=520
+        )
 
-    macro_colors = {
-        "GDP":"#1f77b4", "Unemployment":"#ff7f0e", "CPIH":"#2ca02c",
-        "Yield Spread":"#9467bd", "Credit Card Growth":"#8c564b"
-    }
-    colors = [macro_colors.get(l, "#999999") for l in labels]
-
-    sim_donut = go.Figure(data=[
-        go.Pie(labels=labels, values=vals, hole=0.55,
-               textinfo="label+percent", insidetextorientation="radial",
-               marker=dict(colors=colors, line=dict(color="white", width=1)))
-    ])
-   sim_donut.update_layout(
-    title="Approximate Risk Factor",
-    paper_bgcolor="#ffffff",
-    plot_bgcolor="#ffffff",
-    height=430,
-    legend=dict(
-        orientation="v",
-        yanchor="middle", y=0.5,     # vertically centered
-        xanchor="left",   x=1.02,    # to the right of the plot area
-        bgcolor="rgba(255,255,255,0.85)",
-        bordercolor="#dddddd",
-        borderwidth=1
-    ),
-    margin=dict(l=40, r=220, t=60, b=40)  # extra right margin for the legend
-)
-
-    apply_bordered_style(sim_donut)
-
-    # ----- Macro multi-plot -----
+    # ----- Macro figures
     rows_n=len(present_macros) if present_macros else 1
     macro_fig=make_subplots(rows=rows_n, cols=1, shared_xaxes=True, subplot_titles=present_macros, vertical_spacing=0.06)
     chips=[]
@@ -1227,50 +1167,63 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
 
     return prob_card, sim_donut, analyst_line, rd, macro_fig, micro_fig, chips, data_rows, columns
 
-# --------- Risk Overview (MACRO only; bordered) ----------
+# --------- Risk Overview (simple; bordered) ----------
 @app.callback(
     Output("risk-counts","figure"),
     Output("risk-table-simple","figure"),
     Input("risk-mode","value"),
 )
 def cb_risk_overview_simple(mode):
-    vars_all=[v for v in MACROS if v in DATA]
-    latest_vals={}; state_map={}
+    # Only MACRO variables in Risk Overview (RSIs removed)
+    vars_all = [v for v in MACROS if v in DATA]
+
+    latest_vals = {}
+    state_map = {}
+
     for var in vars_all:
-        df=_baseline_df(DATA, var, "Baseline")
+        df = _baseline_df(DATA, var, "Baseline")
         if df.empty:
-            state_map[var] = "Unknown"; latest_vals[var] = np.nan; continue
+            state_map[var] = "Unknown"
+            latest_vals[var] = np.nan
+            continue
+
         bands = calibrate_bands_simple(DATA, var, mode)
-        s = (pd.to_numeric(df["Actual"], errors="coerce") if "Actual" in df and df["Actual"].notna().any()
+        s = (pd.to_numeric(df["Actual"], errors="coerce")
+             if "Actual" in df and df["Actual"].notna().any()
              else pd.to_numeric(df["Forecast"], errors="coerce"))
         last = s.dropna().iloc[-1] if s.dropna().size else np.nan
-        latest_vals[var]=last if pd.notna(last) else np.nan
-        state_map[var]=classify_point(last, bands)
+        latest_vals[var] = last if pd.notna(last) else np.nan
+        state_map[var] = classify_point(last, bands)
 
-    cG = sum(1 for v in state_map.values() if v=="Green")
-    cA = sum(1 for v in state_map.values() if v=="Amber")
-    cR = sum(1 for v in state_map.values() if v=="Red")
+    cG = sum(1 for v in state_map.values() if v == "Green")
+    cA = sum(1 for v in state_map.values() if v == "Amber")
+    cR = sum(1 for v in state_map.values() if v == "Red")
+
     counts = go.Figure()
     counts.add_bar(x=["Now"], y=[cG], name="Green", marker_color="#2e7d32")
     counts.add_bar(x=["Now"], y=[cA], name="Amber", marker_color="#FFD700")
     counts.add_bar(x=["Now"], y=[cR], name="Red", marker_color="#FF0000")
-    counts.update_layout(barmode="stack", title="number of crisis indicators", showlegend=True, yaxis_title="Count")
+    counts.update_layout(barmode="stack",
+                         title="number of crisis indicators",
+                         showlegend=True, yaxis_title="Count")
     apply_bordered_style(counts)
 
-    order_key = {"Red":0, "Amber":1, "Green":2, "Unknown":3}
+    order_key = {"Red": 0, "Amber": 1, "Green": 2, "Unknown": 3}
     rows = []
-    for var in sorted(vars_all, key=lambda v: (order_key.get(state_map[v],3), v)):
+    for var in sorted(vars_all, key=lambda v: (order_key.get(state_map[v], 3), v)):
         bands = calibrate_bands_simple(DATA, var, mode)
         amber = f"{bands['amber']:.2f}" if bands and 'amber' in bands else "—"
-        red   = f"{bands['red']:.2f}" if bands and 'red' in bands else "—"
+        red   = f"{bands['red']:.2f}"   if bands and 'red' in bands   else "—"
         latest = f"{latest_vals[var]:.2f}" if pd.notna(latest_vals[var]) else "—"
         rows.append([var, state_map[var], latest, amber, red])
 
     table = go.Figure(data=[go.Table(
-        header=dict(values=["Indicator","State","Latest","Amber thr.","Red thr."], fill_color="#f3f4f6"),
+        header=dict(values=["Indicator","State","Latest","Amber thr.","Red thr."],
+                    fill_color="#f3f4f6"),
         cells=dict(values=[list(col) for col in zip(*rows)])
     )])
-    table.update_layout(title="current status (baseline)", paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
+    table.update_layout(title="current status (baseline)",
+                        paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
     return counts, table
 
 
