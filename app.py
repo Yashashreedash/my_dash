@@ -1110,11 +1110,22 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
                textinfo="label+percent", insidetextorientation="radial",
                marker=dict(colors=colors, line=dict(color="white", width=1)))
     ])
-    sim_donut.update_layout(
-        title="Approximate Risk Factor",
-        paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
-        height=430, legend=dict(orientation="h", yanchor="bottom", y=-0.08, xanchor="center", x=0.5)
-    )
+   sim_donut.update_layout(
+    title="Approximate Risk Factor",
+    paper_bgcolor="#ffffff",
+    plot_bgcolor="#ffffff",
+    height=430,
+    legend=dict(
+        orientation="v",
+        yanchor="middle", y=0.5,     # vertically centered
+        xanchor="left",   x=1.02,    # to the right of the plot area
+        bgcolor="rgba(255,255,255,0.85)",
+        bordercolor="#dddddd",
+        borderwidth=1
+    ),
+    margin=dict(l=40, r=220, t=60, b=40)  # extra right margin for the legend
+)
+
     apply_bordered_style(sim_donut)
 
     # ----- Macro multi-plot -----
@@ -1269,3 +1280,4 @@ def cb_risk_overview_simple(mode):
 
 if __name__ == "__main__":
     app.run(debug=True, port=int(os.environ.get("PORT", 8052)))
+
