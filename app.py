@@ -1,5 +1,5 @@
 # UK ECONOMIC CRISIS SIMULATOR — Normalise removed (always OFF)
-# Run locally:  python app.py   → http://127.0.0.1:8050
+# Run locally:  python app.py   → http://127.0.0.1:8052
 
 import os, re
 from pathlib import Path
@@ -404,7 +404,7 @@ def align_by_quarter(s: pd.Series, target_dates, lag: int = 0) -> pd.Series:
     out=s_q.reindex(tgt_q)
     return out.ffill().bfill()
 
-def macro_adjusted_series(DATA: Dict[str, pd.DataFrame], scn: str, pct_map: Dict[str, float]) -> Dict[str, pd.DataFrame]:
+def macro_adjusted_series(DATA: Dict[str,pd.DataFrame], scn: str, pct_map: Dict[str, float]) -> Dict[str, pd.DataFrame]:
     present_macros=[m for m in MACROS if m in DATA]
     base={}
     for var in present_macros:
@@ -532,6 +532,16 @@ macro_opts=[{"label":m,"value":m} for m in MACROS if m in DATA]
 micro_opts=[{"label":m,"value":m} for m in MICROS if m in DATA]
 avail_scn_all=sorted(set(sum([DATA[k]["Scenario"].dropna().unique().tolist() for k in DATA], []))) if DATA else []
 scenario_opts_global=[{"label":s,"value":s} for s in (avail_scn_all or ["Baseline"])]
+
+# ========== NEW: tiny helper for axis titles ==========
+def y_label_for(var: str, norm_on: bool) -> str:
+    base = Y_LABELS.get(var, var)
+    if norm_on:
+        # In case you re-enable normalization later
+        if "Index" not in base:
+            return f"{base} (Index, base=100)"
+    return base
+# =====================================================
 
 # =========================
 # ====== UI / LAYOUT ======
@@ -894,7 +904,9 @@ def cb_macro(var, scn, norm_on, mode):
 
     _add_threshold_lines(fig, df, bands, norm_on)
     add_hist_forecast_divider(fig, df); add_global_crisis_bands(fig); add_crisis_legend(fig)
-    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified", xaxis_title="Quarter",
+    # ---------- NEW: y-axis title ----------
+    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified",
+                      xaxis_title="Quarter", yaxis_title=y_label_for(var, norm_on),
                       autosize=False, uirevision="ind-fixed", margin=dict(r=160))
     apply_bordered_style(fig)
 
@@ -929,7 +941,9 @@ def cb_micro(var, scn, norm_on, mode):
 
     _add_threshold_lines(fig, df, bands, norm_on)
     add_hist_forecast_divider(fig, df); add_global_crisis_bands(fig); add_crisis_legend(fig)
-    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified", xaxis_title="Quarter",
+    # ---------- NEW: y-axis title ----------
+    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified",
+                      xaxis_title="Quarter", yaxis_title=y_label_for(var, norm_on),
                       autosize=False, uirevision="ind-fixed", margin=dict(r=160))
     apply_bordered_style(fig)
     return fig
@@ -1116,6 +1130,9 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
         _add_threshold_lines(macro_fig, dfb, bands, norm_on, row=i)
         add_hist_forecast_divider(macro_fig, dfb, row=i, col=1); add_global_crisis_bands(macro_fig, row=i, col=1)
 
+        # ---------- NEW: per-row y-axis titles ----------
+        macro_fig.update_yaxes(title_text=y_label_for(var, norm_on), row=i, col=1)
+
         tail = pd.to_numeric(pd.Series(adjF), errors="coerce").dropna().tail(2) if adjF is not None else pd.Series([], dtype=float)
         st="Unknown"
         if len(tail):
@@ -1158,7 +1175,10 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
 
         _add_threshold_lines(micro_fig, mb, bands_m, norm_on)
         add_hist_forecast_divider(micro_fig, mb); add_global_crisis_bands(micro_fig); add_crisis_legend(micro_fig)
-        micro_fig.update_layout(title=f"{micro_var} — simulation view", xaxis_title="Quarter", hovermode="x unified",
+        # ---------- NEW: y-axis title ----------
+        micro_fig.update_layout(title=f"{micro_var} — simulation view", xaxis_title="Quarter",
+                                yaxis_title=y_label_for(micro_var, norm_on),
+                                hovermode="x unified",
                                 autosize=False, height=420, uirevision="sim-fixed",
                                 margin=dict(l=60, r=160, t=60, b=60))
         apply_bordered_style(micro_fig)
@@ -1236,10 +1256,3 @@ def cb_risk_overview_simple(mode):
 
 if __name__ == "__main__":
     app.run(debug=True, port=int(os.environ.get("PORT", 8052)))
-
-
-
-
-
-
-
