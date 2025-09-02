@@ -1,5 +1,11 @@
+
+
+
+
+
+
 # UK ECONOMIC CRISIS SIMULATOR — Normalise removed (always OFF)
-# Run locally:  python app.py  → open http://127.0.0.1:8052
+# Run locally:  python app.py   → http://127.0.0.1:8050
 
 import os, re
 from pathlib import Path
@@ -58,7 +64,6 @@ MICROS = [
     "RSI: Household goods", "Non-store Retailing",
     "RSI: Electrical household appliances", "RSI: Watches & Jewellery",
 ]
-
 # Common y-axis labels
 Y_LABELS = {
     "CPIH": "Inflation (%)",
@@ -66,13 +71,14 @@ Y_LABELS = {
     "GDP": "Real GDP (%)",
     "Yield Spread": "10Y–2Y spread",
     "Credit Card Growth": "Credit card growth (%)",
-    "RSI: Predominantly food stores": "(vol, SA; base=100)",
-    "RSI: Clothing & Footwear": "(vol, SA; base=100)",
-    "RSI: Household goods": "(vol, SA; base=100)",
-    "Non-store Retailing": "(vol, SA; base=100)",
-    "RSI: Electrical household appliances": "(vol, SA; base=100)",
-    "RSI: Watches & Jewellery": "(vol, SA; base=100)",
+    "RSI: Predominantly food stores": "RSI(vol, SA; base=100)",
+    "RSI: Clothing & Footwear": "RSI(vol, SA; base=100)",
+    "RSI: Household goods": "RSI(vol, SA; base=100)",
+    "Non-store Retailing": "RSI(vol, SA; base=100)",
+    "RSI: Electrical household appliances": "RSI(vol, SA; base=100)",
+    "RSI: Watches & Jewellery": "RSI(vol, SA; base=100)",
 }
+
 
 MODEL_META: Dict[str, List[Dict]] = {
     "Credit Card Growth": [
@@ -229,6 +235,7 @@ def add_ci_band(fig: go.Figure, df: pd.DataFrame, norm_on: bool, row=None, col=N
             else:
                 fig.add_trace(t_up); fig.add_trace(t_lo)
 
+# ======= Crisis shading & legend — exact color match =======
 def hex_to_rgba(hex_color: str, alpha: float) -> str:
     hex_color = hex_color.lstrip('#'); r = int(hex_color[0:2],16); g = int(hex_color[2:4],16); b=int(hex_color[4:6],16)
     return f"rgba({r},{g},{b},{alpha})"
@@ -253,12 +260,14 @@ def add_crisis_legend(fig: go.Figure):
                                  line=dict(color=p["hex"], width=8),
                                  name=p["name"], hoverinfo="skip", showlegend=True, legendgroup="crisis"))
 
+# ======= Consistent bordered-plot styling =======
 def apply_bordered_style(fig: go.Figure):
     fig.update_layout(paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
     fig.update_xaxes(showline=True, linewidth=1, linecolor="#bdbdbd", mirror=True, zeroline=False)
     fig.update_yaxes(showline=True, linewidth=1, linecolor="#bdbdbd", mirror=True, zeroline=False)
     return fig
 
+# ---------- Thresholds / classification ----------
 def _baseline_df(data: Dict[str,pd.DataFrame], var: str, scn="Baseline") -> pd.DataFrame:
     if var not in data: return pd.DataFrame()
     df=data[var]
@@ -310,6 +319,7 @@ def latest_value(df: pd.DataFrame, prefer_actual=True) -> Optional[float]:
         return float(pd.to_numeric(df["Forecast"], errors="coerce").dropna().iloc[-1])
     return None
 
+# ---------- People impact helpers ----------
 def yield_spread_logistic_prob(DATA: Dict[str,pd.DataFrame]) -> Optional[float]:
     try:
         from sklearn.linear_model import LogisticRegression
@@ -471,6 +481,7 @@ def tidy_var_scenarios(data: Dict[str,pd.DataFrame])->Dict[str,List[str]]:
 def scenario_exists_for_var(var: str, scn: str, var_scenarios: Dict[str,List[str]])->bool:
     return scn in (var_scenarios.get(var) or [])
 
+# ======= Overall crisis prob (from adjusted macros) =======
 def _ecdf_prob(s: pd.Series, v: float) -> Optional[float]:
     arr = np.sort(pd.to_numeric(s, errors="coerce").dropna().values)
     if len(arr)==0 or v is None or not np.isfinite(v): return None
@@ -489,7 +500,6 @@ def overall_crisis_prob_from_adj(DATA: Dict[str,pd.DataFrame], adj_macros: Dict[
         df_hist = _baseline_df(DATA, var, "Baseline")
         if df_hist.empty: continue
         s_hist = _hist_series_for_bands(df_hist)
-
         v = None
         if var in adj_macros and "Adj Forecast" in adj_macros[var]:
             v = pd.to_numeric(adj_macros[var]["Adj Forecast"], errors="coerce").dropna()
@@ -497,10 +507,8 @@ def overall_crisis_prob_from_adj(DATA: Dict[str,pd.DataFrame], adj_macros: Dict[
         if v is None:
             dfb = DATA[var][DATA[var]["Scenario"]=="Baseline"].copy().sort_values("Quarter")
             v = latest_value(dfb, prefer_actual=False)
-
-        arr = np.sort(pd.to_numeric(s_hist, errors="coerce").dropna().values)
-        if len(arr)==0 or v is None or not np.isfinite(v): continue
-        F = np.searchsorted(arr, v, side="right") / len(arr)
+        F = _ecdf_prob(s_hist, v)
+        if F is None: continue
         direction = calibrate_bands_simple(DATA, var, mode).get("direction","upper")
         p_i = F if direction=="upper" else (1.0 - F)
         p_i = min(max(p_i, 0.0), 1.0) ** gamma
@@ -568,34 +576,13 @@ def scenario_preset_buttons():
         dbc.Button("Persistent inflation", id="preset-infl", color="warning", outline=True),
     ])
 
+def col_kwargs(width: int):
+    return {"width": width} if USE_DBC else {}
+
 top_banner = (dbc.Alert(LOAD_ERROR, color="danger", className="mb-2") if USE_DBC else
               html.Div(LOAD_ERROR, style={"background":"#ffecec","border":"1px solid #ffb3b3","padding":"8px 12px","borderRadius":"8px","color":"#b30000","marginBottom":"10px"})) if LOAD_ERROR else None
 
-def col_kwargs(width):
-    return {"width": width} if USE_DBC else {}
-
-# Risk sensitivity controls (needed by callbacks)
-controls_block = (
-    (dbc.Card if USE_DBC else html.Div)(
-        (dbc.CardBody if USE_DBC else lambda x: html.Div(x, style={"padding":"10px"}))([
-            html.Div([
-                html.Label("Risk sensitivity"),
-                dcc.RadioItems(
-                    id="risk-mode",
-                    options=[
-                        {"label":" Early (more alerts)  q≈0.80","value":"Early"},
-                        {"label":" Balanced  q≈0.85","value":"Balanced"},
-                        {"label":" Conservative (fewer alerts)  q≈0.95","value":"Conservative"},
-                    ],
-                    value="Balanced"
-                )
-            ]),
-        ]),
-        className="shadow-sm"
-    )
-)
-
-# Tabs
+# --- Tabs layout ---
 TABS = dcc.Tabs(
     id="tabs", value="tab-people",
     children=[
@@ -654,7 +641,12 @@ TABS = dcc.Tabs(
             scenario_preset_buttons(),
             html.Div(id="sim-overall-prob", className="my-2"),
 
-            dcc.Graph(id="sim-donut", style={"maxWidth":"900px","margin":"0 auto"}),
+            # Donut first (centered & larger), then one-liner
+            dcc.Graph(
+                id="sim-donut",
+                style={"maxWidth": "900px", "margin": "0 auto"},
+                config={"displaylogo": False, "responsive": True}
+            ),
 
             html.Div(id="sim-analyst-line", className="my-2", style={"fontWeight":"500", "textAlign":"center"}),
 
@@ -669,42 +661,51 @@ TABS = dcc.Tabs(
                 ], **col_kwargs(3)),
             ], className="g-2"),
 
-            # Sliders (green styling comes from assets/green-sliders.css)
-            (dbc.Row if USE_DBC else html.Div)([
-                (dbc.Col if USE_DBC else html.Div)([
-                    html.Label("Δ Credit Card Growth (%)"),
-                    dcc.Slider(id="pct-ccg", min=-50, max=50, step=1, value=0,
-                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})
-                ], **col_kwargs(6)),
-                (dbc.Col if USE_DBC else html.Div)([
-                    html.Label("Δ CPIH (%)"),
-                    dcc.Slider(id="pct-cpih", min=-50, max=50, step=1, value=0,
-                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})
-                ], **col_kwargs(6)),
-            ], className="g-2"),
-            (dbc.Row if USE_DBC else html.Div)([
-                (dbc.Col if USE_DBC else html.Div)([
-                    html.Label("Δ Unemployment (%)"),
-                    dcc.Slider(id="pct-unemp", min=-50, max=50, step=1, value=0,
-                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})
-                ], **col_kwargs(6)),
-                (dbc.Col if USE_DBC else html.Div)([
-                    html.Label("Δ GDP (%)"),
-                    dcc.Slider(id="pct-gdp", min=-50, max=50, step=1, value=0,
-                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})
-                ], **col_kwargs(6)),
-            ], className="g-2"),
-            (dbc.Row if USE_DBC else html.Div)([
-                (dbc.Col if USE_DBC else html.Div)([
-                    html.Label("Δ Yield Spread (%)"),
-                    dcc.Slider(id="pct-yield", min=-50, max=50, step=1, value=0,
-                               marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})
-                ], **col_kwargs(6)),
-            ], className="g-2"),
+            # Green sliders via CSS (wrap in a class)
+            html.Div(className="sim-green-sliders", children=[
+                (dbc.Row if USE_DBC else html.Div)([
+                    (dbc.Col if USE_DBC else html.Div)([
+                        html.Label("Δ Credit Card Growth (%)"),
+                        dcc.Slider(id="pct-ccg", min=-50, max=50, step=1, value=0,
+                                   marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})
+                    ], **col_kwargs(6)),
+                    (dbc.Col if USE_DBC else html.Div)([
+                        html.Label("Δ CPIH (%)"),
+                        dcc.Slider(id="pct-cpih", min=-50, max=50, step=1, value=0,
+                                   marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})
+                    ], **col_kwargs(6)),
+                ], className="g-2"),
+                (dbc.Row if USE_DBC else html.Div)([
+                    (dbc.Col if USE_DBC else html.Div)([
+                        html.Label("Δ Unemployment (%)"),
+                        dcc.Slider(id="pct-unemp", min=-50, max=50, step=1, value=0,
+                                   marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})
+                    ], **col_kwargs(6)),
+                    (dbc.Col if USE_DBC else html.Div)([
+                        html.Label("Δ GDP (%)"),
+                        dcc.Slider(id="pct-gdp", min=-50, max=50, step=1, value=0,
+                                   marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})
+                    ], **col_kwargs(6)),
+                ], className="g-2"),
+                (dbc.Row if USE_DBC else html.Div)([
+                    (dbc.Col if USE_DBC else html.Div)([
+                        html.Label("Δ Yield Spread (%)"),
+                        dcc.Slider(id="pct-yield", min=-50, max=50, step=1, value=0,
+                                   marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})
+                    ], **col_kwargs(6)),
+                ], className="g-2"),
+            ]),
 
             html.Div(id="sim-pct-readout", className="mt-1 text-muted"),
-            dcc.Graph(id="sim-macro-graph"),
-            dcc.Graph(id="sim-micro-graph"),
+
+            # Fixed-size graphs, non-responsive to avoid shrinking
+            dcc.Graph(id="sim-macro-graph",
+                      style={"height": "1100px"},
+                      config={"displaylogo": False, "responsive": False}),
+            dcc.Graph(id="sim-micro-graph",
+                      style={"height": "420px"},
+                      config={"displaylogo": False, "responsive": False}),
+
             html.Div(id="sim-risk-chips", className="mt-2"),
             html.Hr(),
             html.H5("Simulation Summary"),
@@ -725,12 +726,11 @@ TABS = dcc.Tabs(
     ],
 )
 
-# Layout
+# ===== Layout: Store set to False so normalisation is OFF forever =====
 app.layout = (dbc.Container if USE_DBC else html.Div)([
     html.Div([ html.H2("UK Economic Crisis Simulator", className="mb-0") ], className="my-3"),
     *( [top_banner] if top_banner else [] ),
-    controls_block,
-    dcc.Store(id="normalize-flag", storage_type="memory", data=False),
+    dcc.Store(id="normalize-flag", storage_type="memory", data=False),  # <- always False
     TABS
 ], fluid=True)
 
@@ -764,6 +764,7 @@ def cb_people(mode):
     k3 = kpi_card("Unemployment", info["un"], info["job_heat"], color="primary")
     k4 = kpi_card("GDP momentum", info["gdp_mom"], "last few quarters", color="success")
 
+    # NOTE: add "extra" here as requested
     tiles = [
         info_badge(f"Cost of living: {info['monthly_cost']} extra", "#fff59d"),
         info_badge(f"Job market: {info['job_heat']}", color_for_state_bg("Green") if "Cool" in info["job_heat"]
@@ -806,11 +807,10 @@ def cb_people(mode):
                textposition="inside", insidetextorientation="radial", textfont=dict(size=14),
                hovertext=hover, hoverinfo="text", showlegend=True)
     ])
-    donut.update_layout(title="Current impact",
-                        paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
-                        legend=dict(orientation="v", x=1.05, y=0.5))
+    donut.update_layout(title="Current impact", paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
     return k1, k2, k3, k4, tiles, info["story"], donut
 
+# Indicators: dropdown sync
 @app.callback(Output("macro-scn","options"), Output("macro-scn","value"), Input("macro-var","value"))
 def sync_macro_scn(var):
     scns=(VAR_SCENARIOS.get(var,[]) if var else []) or avail_scn_all or ["Baseline"]
@@ -853,12 +853,13 @@ def _add_threshold_lines(fig: go.Figure, df: pd.DataFrame, bands: Dict[str,float
             fig.add_annotation(x=x1, y=red, text="Red", showarrow=False, yshift=-10, xanchor="right",
                                font=dict(size=10, color="#FF0000"))
 
+# Indicators: macro chart
 @app.callback(
     Output("macro-graph","figure"),
     Output("macro-risk-chip","children"),
     Input("macro-var","value"),
     Input("macro-scn","value"),
-    Input("normalize-flag","data"),
+    Input("normalize-flag","data"),  # always False
     Input("risk-mode","value"),
 )
 def cb_macro(var, scn, norm_on, mode):
@@ -880,8 +881,9 @@ def cb_macro(var, scn, norm_on, mode):
 
     _add_threshold_lines(fig, df, bands, norm_on)
     add_hist_forecast_divider(fig, df); add_global_crisis_bands(fig); add_crisis_legend(fig)
-    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified",
-                      xaxis_title="Quarter", yaxis_title=Y_LABELS.get(var, "Value"))
+    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified", xaxis_title="Quarter")
+    # keep size stable
+    fig.update_layout(autosize=False, uirevision="ind-fixed", margin=dict(r=160))
     apply_bordered_style(fig)
 
     latest = latest_value(df, prefer_actual=False)
@@ -889,11 +891,12 @@ def cb_macro(var, scn, norm_on, mode):
     chip = info_badge(f"{var}: {state}", color_for_state_bg(state))
     return fig, chip
 
+# Indicators: micro chart
 @app.callback(
     Output("micro-graph","figure"),
     Input("micro-var","value"),
     Input("micro-scn","value"),
-    Input("normalize-flag","data"),
+    Input("normalize-flag","data"),  # always False
     Input("risk-mode","value"),
 )
 def cb_micro(var, scn, norm_on, mode):
@@ -914,11 +917,12 @@ def cb_micro(var, scn, norm_on, mode):
 
     _add_threshold_lines(fig, df, bands, norm_on)
     add_hist_forecast_divider(fig, df); add_global_crisis_bands(fig); add_crisis_legend(fig)
-    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified",
-                      xaxis_title="Quarter", yaxis_title=Y_LABELS.get(var, "Value"))
+    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified", xaxis_title="Quarter")
+    fig.update_layout(autosize=False, uirevision="ind-fixed", margin=dict(r=160))
     apply_bordered_style(fig)
     return fig
 
+# Simulation: scenario sync
 @app.callback(Output("sim-scn","options"), Output("sim-scn","value"), Input("sim-micro-var","value"))
 def sync_sim_scn(micro_var):
     macro_sets=[set(VAR_SCENARIOS.get(m,[])) for m in MACROS if m in VAR_SCENARIOS]
@@ -927,44 +931,7 @@ def sync_sim_scn(micro_var):
     scns=sorted(inter) or (VAR_SCENARIOS.get(micro_var,[]) if micro_var in VAR_SCENARIOS else avail_scn_all) or ["Baseline"]
     return [{"label":s,"value":s} for s in scns], scns[0]
 
-def compute_risk_components(DATA, adj_macros, mode):
-    if not adj_macros: return []
-    w_base = {"GDP":0.28, "Unemployment":0.28, "CPIH":0.20, "Yield Spread":0.18, "Credit Card Growth":0.06}
-    gamma_map = {"Early":0.85, "Balanced":1.0, "Conservative":1.25}
-    gamma = gamma_map.get(mode, 1.0)
-
-    rows=[]
-    for var in MACROS:
-        if var not in DATA: continue
-        df_hist = _baseline_df(DATA, var, "Baseline")
-        if df_hist.empty: continue
-        s_hist = _hist_series_for_bands(df_hist)
-
-        v = None
-        if var in adj_macros and "Adj Forecast" in adj_macros[var]:
-            v = pd.to_numeric(adj_macros[var]["Adj Forecast"], errors="coerce").dropna()
-            v = float(v.iloc[-1]) if len(v) else None
-        if v is None:
-            dfb = DATA[var][DATA[var]["Scenario"]=="Baseline"].copy().sort_values("Quarter")
-            v = latest_value(dfb, prefer_actual=False)
-
-        arr = np.sort(pd.to_numeric(s_hist, errors="coerce").dropna().values)
-        if len(arr)==0 or v is None or not np.isfinite(v): continue
-        F = np.searchsorted(arr, v, side="right") / len(arr)
-        direction = calibrate_bands_simple(DATA, var, mode).get("direction","upper")
-        p_i = F if direction=="upper" else (1.0 - F)
-        p_i = min(max(p_i, 0.0), 1.0) ** gamma
-        rows.append({"var":var, "w":w_base.get(var,0.1), "p":p_i})
-
-    if not rows: return []
-    total = sum(r["w"]*r["p"] for r in rows)
-    if total <= 0:
-        n=len(rows)
-        for r in rows: r["share"]=1.0/n
-    else:
-        for r in rows: r["share"]=(r["w"]*r["p"])/total
-    return rows
-
+# ------- helper: build analyst one-liner -------
 def build_analyst_line(micro_var: str, mode: str, df_micro_base: pd.DataFrame, df_micro_adj: pd.DataFrame, overall_p: Optional[float]) -> str:
     p_str = "—" if overall_p is None else f"{overall_p*100:.0f}%"
     series_for_trend = None
@@ -974,29 +941,24 @@ def build_analyst_line(micro_var: str, mode: str, df_micro_base: pd.DataFrame, d
         series_for_trend = pd.to_numeric(df_micro_base.get("Forecast", pd.Series(dtype=float)), errors="coerce")
         if series_for_trend.notna().sum() < 2 and "Actual" in df_micro_base:
             series_for_trend = pd.to_numeric(df_micro_base["Actual"], errors="coerce")
-
     trend = "—"
     if series_for_trend is not None and series_for_trend.notna().sum() >= 2:
         s = series_for_trend.dropna()
         d = s.iloc[-1] - s.iloc[-2]
         trend = "rising" if d > 0 else ("falling" if d < 0 else "flat")
-
     if isinstance(df_micro_adj, pd.DataFrame) and "Adj Forecast" in df_micro_adj:
         v = pd.to_numeric(df_micro_adj["Adj Forecast"], errors="coerce").dropna()
         v = float(v.iloc[-1]) if len(v) else None
     else:
         v = None
     if v is None and isinstance(df_micro_base, pd.DataFrame):
-        if "Forecast" in df_micro_base:
-            vv = pd.to_numeric(df_micro_base["Forecast"], errors="coerce").dropna()
-            v = float(vv.iloc[-1]) if len(vv) else None
+        vv = pd.to_numeric(df_micro_base.get("Forecast", pd.Series(dtype=float)), errors="coerce").dropna()
+        v = float(vv.iloc[-1]) if len(vv) else None
         if v is None and "Actual" in df_micro_base:
             vv = pd.to_numeric(df_micro_base["Actual"], errors="coerce").dropna()
             v = float(vv.iloc[-1]) if len(vv) else None
-
     bands = calibrate_bands_simple(DATA, micro_var, mode)
     state = classify_point(v, bands) if v is not None else "Unknown"
-
     next_thr = None
     dist = None
     if bands and v is not None and state in ("Green","Amber"):
@@ -1014,13 +976,13 @@ def build_analyst_line(micro_var: str, mode: str, df_micro_base: pd.DataFrame, d
     elif state == "Red":
         next_thr = "Red"
         dist = 0.0
-
     if next_thr and dist is not None:
         dist_txt = f"{dist:.2f} pts"
         return f"At {p_str} 12-m crisis odds, {micro_var} is {trend} and {dist_txt} from {next_thr} (status: {state})."
     else:
         return f"At {p_str} 12-m crisis odds, {micro_var} is {trend} (status: {state})."
 
+# Simulation main
 @app.callback(
     Output("sim-overall-prob","children"),
     Output("sim-donut","figure"),
@@ -1033,7 +995,7 @@ def build_analyst_line(micro_var: str, mode: str, df_micro_base: pd.DataFrame, d
     Output("sim-table","columns"),
     Input("sim-micro-var","value"),
     Input("sim-scn","value"),
-    Input("normalize-flag","data"),
+    Input("normalize-flag","data"),   # always False
     Input("risk-mode","value"),
     Input("preset-recession","n_clicks"),
     Input("preset-recovery","n_clicks"),
@@ -1071,26 +1033,46 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
     overall_p = overall_crisis_prob_from_adj(DATA, adj_macros, mode)
     prob_card = kpi_card("Overall crisis probability (12m)", "—" if overall_p is None else f"{overall_p*100:.0f}%", "based on adjusted macros", color="danger")
 
-    comps = compute_risk_components(DATA, adj_macros, mode)
-    if comps:
-        labels=[c["var"] for c in comps]
-        values=[max(c["share"],0)*100 for c in comps]
+    # ----- Build "Approximate Risk Factor" donut (macro contributions) -----
+    # Use calibrated direction + empirical CDF position as proxy contribution
+    labels=[]; contrib=[]
+    w_base = {"GDP":0.28, "Unemployment":0.28, "CPIH":0.20, "Yield Spread":0.18, "Credit Card Growth":0.06}
+    for var in present_macros:
+        df_hist = _baseline_df(DATA, var, "Baseline")
+        if df_hist.empty: continue
+        s_hist = _hist_series_for_bands(df_hist)
+        v = None
+        if var in adj_macros and "Adj Forecast" in adj_macros[var]:
+            vv = pd.to_numeric(adj_macros[var]["Adj Forecast"], errors="coerce").dropna()
+            v = float(vv.iloc[-1]) if len(vv) else None
+        if v is None:
+            vv = pd.to_numeric(base_macros[var]["Forecast"], errors="coerce").dropna()
+            v = float(vv.iloc[-1]) if len(vv) else None
+        arr = np.sort(pd.to_numeric(s_hist, errors="coerce").dropna().values)
+        if len(arr)==0 or v is None or not np.isfinite(v): continue
+        F = np.searchsorted(arr, v, side="right") / len(arr)
+        direction = calibrate_bands_simple(DATA, var, mode).get("direction","upper")
+        risk_p = F if direction=="upper" else (1.0 - F)
+        labels.append(var)
+        contrib.append(max(risk_p * w_base.get(var, 0.1), 0.0))
+    if not contrib:
+        donut_fig = go.Figure()
     else:
-        labels=present_macros
-        values=[100.0/len(present_macros)]*len(present_macros) if present_macros else []
-
-    donut = go.Figure(data=[go.Pie(
-        labels=labels, values=values, hole=0.58,
-        texttemplate="%{label}<br><b>%{value:.1f}%</b>",
-        marker=dict(line=dict(color="white", width=1)),
-        showlegend=True
-    )])
-    donut.update_layout(
-        title="Approximate Risk Factor",
-        paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
-        legend=dict(orientation="v", x=1.05, y=0.5),
-        margin=dict(l=60, r=180, t=60, b=20)
-    )
+        total = sum(contrib)
+        vals = [x/total * 100 for x in contrib] if total>0 else contrib
+        donut_fig = go.Figure(data=[go.Pie(
+            labels=labels, values=vals, hole=0.55,
+            texttemplate="%{label}<br>%{value:.1f}%",
+            textposition="inside",
+            marker=dict(line=dict(color="white", width=1))
+        )])
+        donut_fig.update_layout(
+            title="Approximate Risk Factor",
+            legend=dict(orientation="v", x=1.02, xanchor="left", y=0.5),
+            margin=dict(l=40, r=180, t=60, b=40),
+            autosize=False, height=500, uirevision="sim-fixed",
+            paper_bgcolor="#ffffff", plot_bgcolor="#ffffff"
+        )
 
     rows_n=len(present_macros) if present_macros else 1
     macro_fig=make_subplots(rows=rows_n, cols=1, shared_xaxes=True, subplot_titles=present_macros, vertical_spacing=0.06)
@@ -1117,14 +1099,12 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
             fidx=baseF.first_valid_index()
             if fidx is not None:
                 fdate=dfb.loc[fidx,"Quarter"]; mask=dfa["Quarter"]>=fdate
-                yAdj_full=to_index_100_relative(adjF, base0) if norm_on else adjF
+                yAdj_full=to_index_100_relative(pd.to_numeric(adjF, errors="coerce"), base0) if norm_on else pd.to_numeric(adjF, errors="coerce")
                 yAdj_ser=pd.Series(yAdj_full, index=dfa.index)
                 macro_fig.add_trace(go.Scatter(x=dfa.loc[mask,"Quarter"], y=yAdj_ser.loc[mask], mode="lines", name="Adjusted", showlegend=(i==1)), row=i,col=1)
 
         _add_threshold_lines(macro_fig, dfb, bands, norm_on, row=i)
         add_hist_forecast_divider(macro_fig, dfb, row=i, col=1); add_global_crisis_bands(macro_fig, row=i, col=1)
-
-        macro_fig.update_yaxes(title_text=Y_LABELS.get(var, "Value"), row=i, col=1)
 
         tail = pd.to_numeric(pd.Series(adjF), errors="coerce").dropna().tail(2) if adjF is not None else pd.Series([], dtype=float)
         st="Unknown"
@@ -1134,10 +1114,12 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
         chips.append(info_badge(f"{var}: {st}", color_for_state_bg(st)))
 
     add_crisis_legend(macro_fig)
-    macro_fig.update_xaxes(title_text="Quarter", row=rows_n, col=1)
-    macro_fig.update_layout(title=f"Simulation — {scn_use}", hovermode="x unified", height=220*rows_n)
+    macro_fig.update_layout(title=f"Simulation — {scn_use}", hovermode="x unified", height=220*rows_n,
+                            autosize=False, uirevision="sim-fixed",
+                            margin=dict(l=60, r=160, t=60, b=60))
     apply_bordered_style(macro_fig)
 
+    # Micro fig
     df_micro_base=DATA[micro_var][DATA[micro_var]["Scenario"]==scn_use].copy().sort_values("Quarter")
     df_micro_adj = micro_adj.get(micro_var, pd.DataFrame())
     micro_fig=go.Figure()
@@ -1166,12 +1148,15 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
 
         _add_threshold_lines(micro_fig, mb, bands_m, norm_on)
         add_hist_forecast_divider(micro_fig, mb); add_global_crisis_bands(micro_fig); add_crisis_legend(micro_fig)
-        micro_fig.update_layout(title=f"{micro_var} — simulation view", xaxis_title="Quarter",
-                                yaxis_title=Y_LABELS.get(micro_var, "Value"), hovermode="x unified")
+        micro_fig.update_layout(title=f"{micro_var} — simulation view", xaxis_title="Quarter", hovermode="x unified",
+                                autosize=False, height=420, uirevision="sim-fixed",
+                                margin=dict(l=60, r=160, t=60, b=60))
         apply_bordered_style(micro_fig)
 
+    # Analyst one-liner
     analyst_line = build_analyst_line(micro_var, mode, df_micro_base, df_micro_adj, overall_p)
 
+    # Summary table
     headers = ["Indicator","Latest Actual","Latest Forecast","Latest Adjusted","Amber thr.","Red thr."]
     data_rows = []
     for var in present_macros:
@@ -1189,67 +1174,72 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
     rd=(f"Shocks → CardGrowth {pct_map['Credit Card Growth']}%, CPIH {pct_map['CPIH']}%, "
         f"Unemp {pct_map['Unemployment']}%, GDP {pct_map['GDP']}%, YieldSpread {pct_map['Yield Spread']}%.")
 
-    return prob_card, donut, analyst_line, rd, macro_fig, micro_fig, chips, data_rows, columns
+    return prob_card, donut_fig, analyst_line, rd, macro_fig, micro_fig, chips, data_rows, columns
 
+# --------- Risk Overview (simple; bordered) ----------
 @app.callback(
     Output("risk-counts","figure"),
     Output("risk-table-simple","figure"),
     Input("risk-mode","value"),
 )
 def cb_risk_overview_simple(mode):
-    vars_all = [v for v in MACROS if v in DATA]
-
-    latest_vals = {}
-    state_map = {}
-
+    vars_all=[v for v in (MACROS) if v in DATA]   # RSIs removed
+    latest_vals={}; state_map={}
     for var in vars_all:
-        df = _baseline_df(DATA, var, "Baseline")
+        df=_baseline_df(DATA, var, "Baseline")
         if df.empty:
-            state_map[var] = "Unknown"
-            latest_vals[var] = np.nan
-            continue
-
+            state_map[var] = "Unknown"; latest_vals[var] = np.nan; continue
         bands = calibrate_bands_simple(DATA, var, mode)
-        s = (pd.to_numeric(df["Actual"], errors="coerce")
-             if "Actual" in df and df["Actual"].notna().any()
+        s = (pd.to_numeric(df["Actual"], errors="coerce") if "Actual" in df and df["Actual"].notna().any()
              else pd.to_numeric(df["Forecast"], errors="coerce"))
         last = s.dropna().iloc[-1] if s.dropna().size else np.nan
-        latest_vals[var] = last if pd.notna(last) else np.nan
-        state_map[var] = classify_point(last, bands)
+        latest_vals[var]=last if pd.notna(last) else np.nan
+        state_map[var]=classify_point(last, bands)
 
-    cG = sum(1 for v in state_map.values() if v == "Green")
-    cA = sum(1 for v in state_map.values() if v == "Amber")
-    cR = sum(1 for v in state_map.values() if v == "Red")
-
+    cG = sum(1 for v in state_map.values() if v=="Green")
+    cA = sum(1 for v in state_map.values() if v=="Amber")
+    cR = sum(1 for v in state_map.values() if v=="Red")
     counts = go.Figure()
     counts.add_bar(x=["Now"], y=[cG], name="Green", marker_color="#2e7d32")
     counts.add_bar(x=["Now"], y=[cA], name="Amber", marker_color="#FFD700")
     counts.add_bar(x=["Now"], y=[cR], name="Red", marker_color="#FF0000")
-    counts.update_layout(barmode="stack",
-                         title="number of crisis indicators",
-                         showlegend=True,
-                         xaxis_title="Snapshot",
-                         yaxis_title="Number of indicators")
+    counts.update_layout(barmode="stack", title="number of crisis indicators", showlegend=True, yaxis_title="Count")
     apply_bordered_style(counts)
 
-    order_key = {"Red": 0, "Amber": 1, "Green": 2, "Unknown": 3}
+    order_key = {"Red":0, "Amber":1, "Green":2, "Unknown":3}
     rows = []
-    for var in sorted(vars_all, key=lambda v: (order_key.get(state_map[v], 3), v)):
+    for var in sorted(vars_all, key=lambda v: (order_key.get(state_map[v],3), v)):
         bands = calibrate_bands_simple(DATA, var, mode)
         amber = f"{bands['amber']:.2f}" if bands and 'amber' in bands else "—"
-        red   = f"{bands['red']:.2f}"   if bands and 'red' in bands   else "—"
+        red   = f"{bands['red']:.2f}" if bands and 'red' in bands else "—"
         latest = f"{latest_vals[var]:.2f}" if pd.notna(latest_vals[var]) else "—"
         rows.append([var, state_map[var], latest, amber, red])
 
     table = go.Figure(data=[go.Table(
-        header=dict(values=["Indicator","State","Latest","Amber thr.","Red thr."],
-                    fill_color="#f3f4f6"),
+        header=dict(values=["Indicator","State","Latest","Amber thr.","Red thr."], fill_color="#f3f4f6"),
         cells=dict(values=[list(col) for col in zip(*rows)])
     )])
-    table.update_layout(title="current status (baseline)",
-                        paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
+    table.update_layout(title="current status (baseline)", paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
     return counts, table
+
+
+# =========================
+# ====== RUN SERVER =======
+# =========================
 
 if __name__ == "__main__":
     app.run(debug=True, port=int(os.environ.get("PORT", 8052)))
+
+
+
+
+
+
+
+
+
+
+
+
+
 
