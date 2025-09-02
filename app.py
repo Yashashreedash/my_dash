@@ -1,9 +1,3 @@
-
-
-
-
-
-
 # UK ECONOMIC CRISIS SIMULATOR — Normalise removed (always OFF)
 # Run locally:  python app.py   → http://127.0.0.1:8050
 
@@ -64,21 +58,6 @@ MICROS = [
     "RSI: Household goods", "Non-store Retailing",
     "RSI: Electrical household appliances", "RSI: Watches & Jewellery",
 ]
-# Common y-axis labels
-Y_LABELS = {
-    "CPIH": "Inflation (%)",
-    "Unemployment": "Unemployment rate (%)",
-    "GDP": "Real GDP (%)",
-    "Yield Spread": "10Y–2Y spread",
-    "Credit Card Growth": "Credit card growth (%)",
-    "RSI: Predominantly food stores": "RSI(vol, SA; base=100)",
-    "RSI: Clothing & Footwear": "RSI(vol, SA; base=100)",
-    "RSI: Household goods": "RSI(vol, SA; base=100)",
-    "Non-store Retailing": "RSI(vol, SA; base=100)",
-    "RSI: Electrical household appliances": "RSI(vol, SA; base=100)",
-    "RSI: Watches & Jewellery": "RSI(vol, SA; base=100)",
-}
-
 
 MODEL_META: Dict[str, List[Dict]] = {
     "Credit Card Growth": [
@@ -235,7 +214,7 @@ def add_ci_band(fig: go.Figure, df: pd.DataFrame, norm_on: bool, row=None, col=N
             else:
                 fig.add_trace(t_up); fig.add_trace(t_lo)
 
-# ======= Crisis shading & legend — exact color match =======
+# ======= Crisis shading & legend =======
 def hex_to_rgba(hex_color: str, alpha: float) -> str:
     hex_color = hex_color.lstrip('#'); r = int(hex_color[0:2],16); g = int(hex_color[2:4],16); b=int(hex_color[4:6],16)
     return f"rgba({r},{g},{b},{alpha})"
@@ -260,7 +239,7 @@ def add_crisis_legend(fig: go.Figure):
                                  line=dict(color=p["hex"], width=8),
                                  name=p["name"], hoverinfo="skip", showlegend=True, legendgroup="crisis"))
 
-# ======= Consistent bordered-plot styling =======
+# ======= Styling =======
 def apply_bordered_style(fig: go.Figure):
     fig.update_layout(paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
     fig.update_xaxes(showline=True, linewidth=1, linecolor="#bdbdbd", mirror=True, zeroline=False)
@@ -481,7 +460,6 @@ def tidy_var_scenarios(data: Dict[str,pd.DataFrame])->Dict[str,List[str]]:
 def scenario_exists_for_var(var: str, scn: str, var_scenarios: Dict[str,List[str]])->bool:
     return scn in (var_scenarios.get(var) or [])
 
-# ======= Overall crisis prob (from adjusted macros) =======
 def _ecdf_prob(s: pd.Series, v: float) -> Optional[float]:
     arr = np.sort(pd.to_numeric(s, errors="coerce").dropna().values)
     if len(arr)==0 or v is None or not np.isfinite(v): return None
@@ -500,6 +478,7 @@ def overall_crisis_prob_from_adj(DATA: Dict[str,pd.DataFrame], adj_macros: Dict[
         df_hist = _baseline_df(DATA, var, "Baseline")
         if df_hist.empty: continue
         s_hist = _hist_series_for_bands(df_hist)
+
         v = None
         if var in adj_macros and "Adj Forecast" in adj_macros[var]:
             v = pd.to_numeric(adj_macros[var]["Adj Forecast"], errors="coerce").dropna()
@@ -507,12 +486,14 @@ def overall_crisis_prob_from_adj(DATA: Dict[str,pd.DataFrame], adj_macros: Dict[
         if v is None:
             dfb = DATA[var][DATA[var]["Scenario"]=="Baseline"].copy().sort_values("Quarter")
             v = latest_value(dfb, prefer_actual=False)
+
         F = _ecdf_prob(s_hist, v)
-        if F is None: continue
         direction = calibrate_bands_simple(DATA, var, mode).get("direction","upper")
         p_i = F if direction=="upper" else (1.0 - F)
         p_i = min(max(p_i, 0.0), 1.0) ** gamma
-        ws.append(w_base.get(var, 0.1)); ps.append(p_i)
+
+        ws.append(w_base.get(var, 0.1))
+        ps.append(p_i)
 
     if not ps: return None
     ws = np.array(ws, dtype=float); ws = ws / ws.sum()
@@ -579,6 +560,27 @@ def scenario_preset_buttons():
 def col_kwargs(width: int):
     return {"width": width} if USE_DBC else {}
 
+# Risk sensitivity control (this was missing → callbacks failed)
+controls_block = (
+    (dbc.Card if USE_DBC else html.Div)(
+        (dbc.CardBody if USE_DBC else lambda x: html.Div(x, style={"padding":"10px"}))([
+            html.Div([
+                html.Label("Risk sensitivity"),
+                dcc.RadioItems(
+                    id="risk-mode",
+                    options=[
+                        {"label":" Early (more alerts)  q≈0.80","value":"Early"},
+                        {"label":" Balanced  q≈0.85","value":"Balanced"},
+                        {"label":" Conservative (fewer alerts)  q≈0.95","value":"Conservative"},
+                    ],
+                    value="Balanced", inline=False
+                )
+            ])
+        ]),
+        className="shadow-sm"
+    )
+)
+
 top_banner = (dbc.Alert(LOAD_ERROR, color="danger", className="mb-2") if USE_DBC else
               html.Div(LOAD_ERROR, style={"background":"#ffecec","border":"1px solid #ffb3b3","padding":"8px 12px","borderRadius":"8px","color":"#b30000","marginBottom":"10px"})) if LOAD_ERROR else None
 
@@ -641,13 +643,11 @@ TABS = dcc.Tabs(
             scenario_preset_buttons(),
             html.Div(id="sim-overall-prob", className="my-2"),
 
-            # Donut first (centered & larger), then one-liner
             dcc.Graph(
                 id="sim-donut",
                 style={"maxWidth": "900px", "margin": "0 auto"},
                 config={"displaylogo": False, "responsive": True}
             ),
-
             html.Div(id="sim-analyst-line", className="my-2", style={"fontWeight":"500", "textAlign":"center"}),
 
             (dbc.Row if USE_DBC else html.Div)([
@@ -661,7 +661,7 @@ TABS = dcc.Tabs(
                 ], **col_kwargs(3)),
             ], className="g-2"),
 
-            # Green sliders via CSS (wrap in a class)
+            # Sliders go green via assets/sim.css
             html.Div(className="sim-green-sliders", children=[
                 (dbc.Row if USE_DBC else html.Div)([
                     (dbc.Col if USE_DBC else html.Div)([
@@ -698,7 +698,6 @@ TABS = dcc.Tabs(
 
             html.Div(id="sim-pct-readout", className="mt-1 text-muted"),
 
-            # Fixed-size graphs, non-responsive to avoid shrinking
             dcc.Graph(id="sim-macro-graph",
                       style={"height": "1100px"},
                       config={"displaylogo": False, "responsive": False}),
@@ -726,11 +725,12 @@ TABS = dcc.Tabs(
     ],
 )
 
-# ===== Layout: Store set to False so normalisation is OFF forever =====
+# ===== Layout =====
 app.layout = (dbc.Container if USE_DBC else html.Div)([
     html.Div([ html.H2("UK Economic Crisis Simulator", className="mb-0") ], className="my-3"),
     *( [top_banner] if top_banner else [] ),
     dcc.Store(id="normalize-flag", storage_type="memory", data=False),  # <- always False
+    controls_block,   # <— THIS restores id="risk-mode"
     TABS
 ], fluid=True)
 
@@ -764,7 +764,6 @@ def cb_people(mode):
     k3 = kpi_card("Unemployment", info["un"], info["job_heat"], color="primary")
     k4 = kpi_card("GDP momentum", info["gdp_mom"], "last few quarters", color="success")
 
-    # NOTE: add "extra" here as requested
     tiles = [
         info_badge(f"Cost of living: {info['monthly_cost']} extra", "#fff59d"),
         info_badge(f"Job market: {info['job_heat']}", color_for_state_bg("Green") if "Cool" in info["job_heat"]
@@ -859,7 +858,7 @@ def _add_threshold_lines(fig: go.Figure, df: pd.DataFrame, bands: Dict[str,float
     Output("macro-risk-chip","children"),
     Input("macro-var","value"),
     Input("macro-scn","value"),
-    Input("normalize-flag","data"),  # always False
+    Input("normalize-flag","data"),
     Input("risk-mode","value"),
 )
 def cb_macro(var, scn, norm_on, mode):
@@ -881,9 +880,8 @@ def cb_macro(var, scn, norm_on, mode):
 
     _add_threshold_lines(fig, df, bands, norm_on)
     add_hist_forecast_divider(fig, df); add_global_crisis_bands(fig); add_crisis_legend(fig)
-    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified", xaxis_title="Quarter")
-    # keep size stable
-    fig.update_layout(autosize=False, uirevision="ind-fixed", margin=dict(r=160))
+    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified", xaxis_title="Quarter",
+                      autosize=False, uirevision="ind-fixed", margin=dict(r=160))
     apply_bordered_style(fig)
 
     latest = latest_value(df, prefer_actual=False)
@@ -896,7 +894,7 @@ def cb_macro(var, scn, norm_on, mode):
     Output("micro-graph","figure"),
     Input("micro-var","value"),
     Input("micro-scn","value"),
-    Input("normalize-flag","data"),  # always False
+    Input("normalize-flag","data"),
     Input("risk-mode","value"),
 )
 def cb_micro(var, scn, norm_on, mode):
@@ -917,8 +915,8 @@ def cb_micro(var, scn, norm_on, mode):
 
     _add_threshold_lines(fig, df, bands, norm_on)
     add_hist_forecast_divider(fig, df); add_global_crisis_bands(fig); add_crisis_legend(fig)
-    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified", xaxis_title="Quarter")
-    fig.update_layout(autosize=False, uirevision="ind-fixed", margin=dict(r=160))
+    fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified", xaxis_title="Quarter",
+                      autosize=False, uirevision="ind-fixed", margin=dict(r=160))
     apply_bordered_style(fig)
     return fig
 
@@ -931,7 +929,6 @@ def sync_sim_scn(micro_var):
     scns=sorted(inter) or (VAR_SCENARIOS.get(micro_var,[]) if micro_var in VAR_SCENARIOS else avail_scn_all) or ["Baseline"]
     return [{"label":s,"value":s} for s in scns], scns[0]
 
-# ------- helper: build analyst one-liner -------
 def build_analyst_line(micro_var: str, mode: str, df_micro_base: pd.DataFrame, df_micro_adj: pd.DataFrame, overall_p: Optional[float]) -> str:
     p_str = "—" if overall_p is None else f"{overall_p*100:.0f}%"
     series_for_trend = None
@@ -995,7 +992,7 @@ def build_analyst_line(micro_var: str, mode: str, df_micro_base: pd.DataFrame, d
     Output("sim-table","columns"),
     Input("sim-micro-var","value"),
     Input("sim-scn","value"),
-    Input("normalize-flag","data"),   # always False
+    Input("normalize-flag","data"),
     Input("risk-mode","value"),
     Input("preset-recession","n_clicks"),
     Input("preset-recovery","n_clicks"),
@@ -1033,8 +1030,7 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
     overall_p = overall_crisis_prob_from_adj(DATA, adj_macros, mode)
     prob_card = kpi_card("Overall crisis probability (12m)", "—" if overall_p is None else f"{overall_p*100:.0f}%", "based on adjusted macros", color="danger")
 
-    # ----- Build "Approximate Risk Factor" donut (macro contributions) -----
-    # Use calibrated direction + empirical CDF position as proxy contribution
+    # Donut of Approximate Risk Factor
     labels=[]; contrib=[]
     w_base = {"GDP":0.28, "Unemployment":0.28, "CPIH":0.20, "Yield Spread":0.18, "Credit Card Growth":0.06}
     for var in present_macros:
@@ -1153,10 +1149,8 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
                                 margin=dict(l=60, r=160, t=60, b=60))
         apply_bordered_style(micro_fig)
 
-    # Analyst one-liner
     analyst_line = build_analyst_line(micro_var, mode, df_micro_base, df_micro_adj, overall_p)
 
-    # Summary table
     headers = ["Indicator","Latest Actual","Latest Forecast","Latest Adjusted","Amber thr.","Red thr."]
     data_rows = []
     for var in present_macros:
@@ -1176,14 +1170,14 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
 
     return prob_card, donut_fig, analyst_line, rd, macro_fig, micro_fig, chips, data_rows, columns
 
-# --------- Risk Overview (simple; bordered) ----------
+# --------- Risk Overview ----------
 @app.callback(
     Output("risk-counts","figure"),
     Output("risk-table-simple","figure"),
     Input("risk-mode","value"),
 )
 def cb_risk_overview_simple(mode):
-    vars_all=[v for v in (MACROS) if v in DATA]   # RSIs removed
+    vars_all=[v for v in MACROS if v in DATA]
     latest_vals={}; state_map={}
     for var in vars_all:
         df=_baseline_df(DATA, var, "Baseline")
@@ -1222,21 +1216,12 @@ def cb_risk_overview_simple(mode):
     table.update_layout(title="current status (baseline)", paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
     return counts, table
 
-
 # =========================
 # ====== RUN SERVER =======
 # =========================
 
 if __name__ == "__main__":
     app.run(debug=True, port=int(os.environ.get("PORT", 8052)))
-
-
-
-
-
-
-
-
 
 
 
