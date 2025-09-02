@@ -1,3 +1,6 @@
+
+
+
 # UK ECONOMIC CRISIS SIMULATOR — Normalise removed (always OFF)
 # Run locally:  python app.py   → http://127.0.0.1:8052
 
@@ -53,18 +56,19 @@ SHEET_TO_NAME = {
 }
 
 Y_LABELS = {
-    "CPIH": "Inflation (y/y, %)",
+    "CPIH": "Inflation (%)",
     "Unemployment": "Unemployment rate (%)",
-    "GDP": "Real GDP (q/q, %)",
-    "Yield Spread": "10Y–2Y gilt spread (pp)",
-    "Credit Card Growth": "Credit card growth (y/y, %)",
-    "RSI: Predominantly food stores": "Retail Sales Index (volume, SA; base=100)",
-    "RSI: Clothing & Footwear": "Retail Sales Index (volume, SA; base=100)",
-    "RSI: Household goods": "Retail Sales Index (volume, SA; base=100)",
-    "Non-store Retailing": "Retail Sales Index (volume, SA; base=100)",
-    "RSI: Electrical household appliances": "Retail Sales Index (volume, SA; base=100)",
-    "RSI: Watches & Jewellery": "Retail Sales Index (volume, SA; base=100)",
+    "GDP": "Real GDP (%)",
+    "Yield Spread": "10Y–2Y gilt spread ",
+    "Credit Card Growth": "Credit card growth (%)",
+    "RSI: Predominantly food stores": "RSI(vol, SA; base=100)",
+    "RSI: Clothing & Footwear": "RSI(vol, SA; base=100)",
+    "RSI: Household goods": "RSI(vol, SA; base=100)",
+    "Non-store Retailing": "RSI(vol, SA; base=100)",
+    "RSI: Electrical household appliances": "RSI(vol, SA; base=100)",
+    "RSI: Watches & Jewellery": "RSI(vol, SA; base=100)",
 }
+
 
 MACROS = ["Credit Card Growth", "CPIH", "Unemployment", "GDP", "Yield Spread"]
 MICROS = [
@@ -533,15 +537,13 @@ micro_opts=[{"label":m,"value":m} for m in MICROS if m in DATA]
 avail_scn_all=sorted(set(sum([DATA[k]["Scenario"].dropna().unique().tolist() for k in DATA], []))) if DATA else []
 scenario_opts_global=[{"label":s,"value":s} for s in (avail_scn_all or ["Baseline"])]
 
-# ========== NEW: tiny helper for axis titles ==========
+# ========== Helper for axis titles ==========
 def y_label_for(var: str, norm_on: bool) -> str:
     base = Y_LABELS.get(var, var)
     if norm_on:
-        # In case you re-enable normalization later
         if "Index" not in base:
             return f"{base} (Index, base=100)"
     return base
-# =====================================================
 
 # =========================
 # ====== UI / LAYOUT ======
@@ -584,7 +586,7 @@ def scenario_preset_buttons():
 def col_kwargs(width: int):
     return {"width": width} if USE_DBC else {}
 
-# Risk sensitivity control (this was missing → callbacks failed)
+# Risk sensitivity control
 controls_block = (
     (dbc.Card if USE_DBC else html.Div)(
         (dbc.CardBody if USE_DBC else lambda x: html.Div(x, style={"padding":"10px"}))([
@@ -619,7 +621,8 @@ TABS = dcc.Tabs(
                 (dbc.Col if USE_DBC else html.Div)(id="kpi-un",   **col_kwargs(3)),
                 (dbc.Col if USE_DBC else html.Div)(id="kpi-gdp",  **col_kwargs(3)),
             ], className="g-3 my-1"),
-            html.Div([dcc.Graph(id="people-donut")]),
+            # Centered donut
+            html.Div([dcc.Graph(id="people-donut")], style={"maxWidth": "900px", "margin": "0 auto"}),
             (dbc.Row if USE_DBC else html.Div)([
                 (dbc.Col if USE_DBC else html.Div)([html.H5("Current Situation"), html.Div(id="people-cards")], **col_kwargs(6)),
                 (dbc.Col if USE_DBC else html.Div)([
@@ -646,8 +649,9 @@ TABS = dcc.Tabs(
                     dcc.Dropdown(id="macro-scn", options=scenario_opts_global, value=scenario_opts_global[0]["value"])
                 ], **col_kwargs(3)),
             ], className="g-2"),
-            dcc.Graph(id="macro-graph"),
-            html.Div(id="macro-risk-chip"),
+            # Centered macro graph
+            dcc.Graph(id="macro-graph", style={"maxWidth": "1100px", "margin": "0 auto"}),
+            html.Div(id="macro-risk-chip", style={"maxWidth": "1100px", "margin": "6px auto"}),  # center chip line too
             html.Hr(),
             html.H5("Microeconomic (RSI)"),
             (dbc.Row if USE_DBC else html.Div)([
@@ -660,19 +664,21 @@ TABS = dcc.Tabs(
                     dcc.Dropdown(id="micro-scn", options=scenario_opts_global, value=scenario_opts_global[0]["value"])
                 ], **col_kwargs(3)),
             ], className="g-2"),
-            dcc.Graph(id="micro-graph"),
+            # Centered micro graph
+            dcc.Graph(id="micro-graph", style={"maxWidth": "1100px", "margin": "0 auto"}),
         ]),
 
         dcc.Tab(label="Simulation", value="tab-sim", children=[
             scenario_preset_buttons(),
-            html.Div(id="sim-overall-prob", className="my-2"),
+            html.Div(id="sim-overall-prob", className="my-2", style={"maxWidth":"1100px","margin":"0 auto"}),
 
             dcc.Graph(
                 id="sim-donut",
                 style={"maxWidth": "900px", "margin": "0 auto"},
                 config={"displaylogo": False, "responsive": True}
             ),
-            html.Div(id="sim-analyst-line", className="my-2", style={"fontWeight":"500", "textAlign":"center"}),
+            html.Div(id="sim-analyst-line", className="my-2",
+                     style={"fontWeight":"500", "textAlign":"center", "maxWidth":"1100px","margin":"0 auto"}),
 
             (dbc.Row if USE_DBC else html.Div)([
                 (dbc.Col if USE_DBC else html.Div)([
@@ -683,9 +689,9 @@ TABS = dcc.Tabs(
                     html.Label("Scenario"),
                     dcc.Dropdown(id="sim-scn", options=scenario_opts_global, value=scenario_opts_global[0]["value"])
                 ], **col_kwargs(3)),
-            ], className="g-2"),
+            ], className="g-2", style={"maxWidth":"1100px","margin":"0 auto"}),
 
-            # Sliders go green via assets/sim.css
+            # Sliders
             html.Div(className="sim-green-sliders", children=[
                 (dbc.Row if USE_DBC else html.Div)([
                     (dbc.Col if USE_DBC else html.Div)([
@@ -718,33 +724,36 @@ TABS = dcc.Tabs(
                                    marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})
                     ], **col_kwargs(6)),
                 ], className="g-2"),
-            ]),
+            ], style={"maxWidth":"1100px","margin":"0 auto"}),
 
-            html.Div(id="sim-pct-readout", className="mt-1 text-muted"),
+            html.Div(id="sim-pct-readout", className="mt-1 text-muted", style={"maxWidth":"1100px","margin":"0 auto"}),
 
             dcc.Graph(id="sim-macro-graph",
-                      style={"height": "1100px"},
+                      style={"height": "1100px", "maxWidth": "1100px", "margin": "0 auto"},
                       config={"displaylogo": False, "responsive": False}),
             dcc.Graph(id="sim-micro-graph",
-                      style={"height": "420px"},
+                      style={"height": "420px", "maxWidth": "1100px", "margin": "0 auto"},
                       config={"displaylogo": False, "responsive": False}),
 
-            html.Div(id="sim-risk-chips", className="mt-2"),
+            html.Div(id="sim-risk-chips", className="mt-2", style={"maxWidth":"1100px","margin":"0 auto"}),
             html.Hr(),
-            html.H5("Simulation Summary"),
-            html.H6("Current values"),
-            dash_table.DataTable(
-                id="sim-table",
-                columns=[], data=[],
-                style_table={"overflowX": "auto"},
-                style_cell={"padding":"8px","border":"1px solid #eee"},
-                style_header={"backgroundColor":"#f3f4f6","fontWeight":"bold"}
+            html.H5("Simulation Summary", style={"maxWidth":"1100px","margin":"0 auto"}),
+            html.H6("Current values", style={"maxWidth":"1100px","margin":"0 auto"}),
+            html.Div(
+                dash_table.DataTable(
+                    id="sim-table",
+                    columns=[], data=[],
+                    style_table={"overflowX": "auto"},
+                    style_cell={"padding":"8px","border":"1px solid #eee"},
+                    style_header={"backgroundColor":"#f3f4f6","fontWeight":"bold"}
+                ),
+                style={"maxWidth":"1100px","margin":"0 auto"}
             ),
         ]),
 
         dcc.Tab(label="Risk Overview", value="tab-risk", children=[
-            dcc.Graph(id="risk-counts"),
-            dcc.Graph(id="risk-table-simple"),
+            dcc.Graph(id="risk-counts", style={"maxWidth": "1100px", "margin": "0 auto"}),
+            dcc.Graph(id="risk-table-simple", style={"maxWidth": "1100px", "margin": "0 auto"}),
         ]),
     ],
 )
@@ -754,7 +763,7 @@ app.layout = (dbc.Container if USE_DBC else html.Div)([
     html.Div([ html.H2("UK Economic Crisis Simulator", className="mb-0") ], className="my-3"),
     *( [top_banner] if top_banner else [] ),
     dcc.Store(id="normalize-flag", storage_type="memory", data=False),  # <- always False
-    controls_block,   # <— THIS restores id="risk-mode"
+    controls_block,
     TABS
 ], fluid=True)
 
@@ -904,7 +913,6 @@ def cb_macro(var, scn, norm_on, mode):
 
     _add_threshold_lines(fig, df, bands, norm_on)
     add_hist_forecast_divider(fig, df); add_global_crisis_bands(fig); add_crisis_legend(fig)
-    # ---------- NEW: y-axis title ----------
     fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified",
                       xaxis_title="Quarter", yaxis_title=y_label_for(var, norm_on),
                       autosize=False, uirevision="ind-fixed", margin=dict(r=160))
@@ -941,7 +949,6 @@ def cb_micro(var, scn, norm_on, mode):
 
     _add_threshold_lines(fig, df, bands, norm_on)
     add_hist_forecast_divider(fig, df); add_global_crisis_bands(fig); add_crisis_legend(fig)
-    # ---------- NEW: y-axis title ----------
     fig.update_layout(title=f"{var} · {use_scn}", hovermode="x unified",
                       xaxis_title="Quarter", yaxis_title=y_label_for(var, norm_on),
                       autosize=False, uirevision="ind-fixed", margin=dict(r=160))
@@ -1130,7 +1137,7 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
         _add_threshold_lines(macro_fig, dfb, bands, norm_on, row=i)
         add_hist_forecast_divider(macro_fig, dfb, row=i, col=1); add_global_crisis_bands(macro_fig, row=i, col=1)
 
-        # ---------- NEW: per-row y-axis titles ----------
+        # Per-row y-axis titles
         macro_fig.update_yaxes(title_text=y_label_for(var, norm_on), row=i, col=1)
 
         tail = pd.to_numeric(pd.Series(adjF), errors="coerce").dropna().tail(2) if adjF is not None else pd.Series([], dtype=float)
@@ -1175,7 +1182,6 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
 
         _add_threshold_lines(micro_fig, mb, bands_m, norm_on)
         add_hist_forecast_divider(micro_fig, mb); add_global_crisis_bands(micro_fig); add_crisis_legend(micro_fig)
-        # ---------- NEW: y-axis title ----------
         micro_fig.update_layout(title=f"{micro_var} — simulation view", xaxis_title="Quarter",
                                 yaxis_title=y_label_for(micro_var, norm_on),
                                 hovermode="x unified",
@@ -1256,3 +1262,6 @@ def cb_risk_overview_simple(mode):
 
 if __name__ == "__main__":
     app.run(debug=True, port=int(os.environ.get("PORT", 8052)))
+
+
+
