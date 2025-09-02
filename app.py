@@ -1,6 +1,3 @@
-
-
-
 # UK ECONOMIC CRISIS SIMULATOR — Normalise removed (always OFF)
 # Run locally:  python app.py   → http://127.0.0.1:8052
 
@@ -56,19 +53,18 @@ SHEET_TO_NAME = {
 }
 
 Y_LABELS = {
-    "CPIH": "Inflation (%)",
+    "CPIH": "Inflation (y/y, %)",
     "Unemployment": "Unemployment rate (%)",
-    "GDP": "Real GDP (%)",
-    "Yield Spread": "10Y–2Y gilt spread ",
-    "Credit Card Growth": "Credit card growth (%)",
-    "RSI: Predominantly food stores": "RSI(vol, SA; base=100)",
-    "RSI: Clothing & Footwear": "RSI(vol, SA; base=100)",
-    "RSI: Household goods": "RSI(vol, SA; base=100)",
-    "Non-store Retailing": "RSI(vol, SA; base=100)",
-    "RSI: Electrical household appliances": "RSI(vol, SA; base=100)",
-    "RSI: Watches & Jewellery": "RSI(vol, SA; base=100)",
+    "GDP": "Real GDP (q/q, %)",
+    "Yield Spread": "10Y–2Y gilt spread (pp)",
+    "Credit Card Growth": "Credit card growth (y/y, %)",
+    "RSI: Predominantly food stores": "Retail Sales Index (volume, SA; base=100)",
+    "RSI: Clothing & Footwear": "Retail Sales Index (volume, SA; base=100)",
+    "RSI: Household goods": "Retail Sales Index (volume, SA; base=100)",
+    "Non-store Retailing": "Retail Sales Index (volume, SA; base=100)",
+    "RSI: Electrical household appliances": "Retail Sales Index (volume, SA; base=100)",
+    "RSI: Watches & Jewellery": "Retail Sales Index (volume, SA; base=100)",
 }
-
 
 MACROS = ["Credit Card Growth", "CPIH", "Unemployment", "GDP", "Yield Spread"]
 MICROS = [
@@ -551,6 +547,11 @@ def y_label_for(var: str, norm_on: bool) -> str:
 
 external_stylesheets = [dbc.themes.LUX] if USE_DBC else []
 app = Dash(__name__, external_stylesheets=external_stylesheets)
+server = app.server  # ← expose Flask server for Render / Gunicorn
+
+@server.route("/healthz")
+def healthz():
+    return "ok", 200
 
 def kpi_card(title, value, sub=None, color="primary"):
     if USE_DBC:
@@ -651,7 +652,7 @@ TABS = dcc.Tabs(
             ], className="g-2"),
             # Centered macro graph
             dcc.Graph(id="macro-graph", style={"maxWidth": "1100px", "margin": "0 auto"}),
-            html.Div(id="macro-risk-chip", style={"maxWidth": "1100px", "margin": "6px auto"}),  # center chip line too
+            html.Div(id="macro-risk-chip", style={"maxWidth": "1100px", "margin": "6px auto"}),
             html.Hr(),
             html.H5("Microeconomic (RSI)"),
             (dbc.Row if USE_DBC else html.Div)([
@@ -1261,7 +1262,9 @@ def cb_risk_overview_simple(mode):
 # =========================
 
 if __name__ == "__main__":
-    app.run(debug=True, port=int(os.environ.get("PORT", 8052)))
+    port = int(os.environ.get("PORT", 8052))
+    # Bind to 0.0.0.0 for Render; disable debug/reloader in prod
+    app.run(host="0.0.0.0", port=port, debug=False)
 
 
 
