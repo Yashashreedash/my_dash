@@ -533,13 +533,17 @@ micro_opts=[{"label":m,"value":m} for m in MICROS if m in DATA]
 avail_scn_all=sorted(set(sum([DATA[k]["Scenario"].dropna().unique().tolist() for k in DATA], []))) if DATA else []
 scenario_opts_global=[{"label":s,"value":s} for s in (avail_scn_all or ["Baseline"])]
 
-# ========== Helper for axis titles ==========
+# ========== Axis title helper ==========
 def y_label_for(var: str, norm_on: bool) -> str:
     base = Y_LABELS.get(var, var)
-    if norm_on:
-        if "Index" not in base:
-            return f"{base} (Index, base=100)"
+    if norm_on and "Index" not in base:
+        return f"{base} (Index, base=100)"
     return base
+
+# ========== Centering helper ==========
+def centered(component, maxw=1100):
+    """Wrap any component so it is centered on the page."""
+    return html.Div(component, style={"maxWidth": f"{maxw}px", "margin": "0 auto"})
 
 # =========================
 # ====== UI / LAYOUT ======
@@ -547,7 +551,7 @@ def y_label_for(var: str, norm_on: bool) -> str:
 
 external_stylesheets = [dbc.themes.LUX] if USE_DBC else []
 app = Dash(__name__, external_stylesheets=external_stylesheets)
-server = app.server  # ← expose Flask server for Render / Gunicorn
+server = app.server  # for Render/Gunicorn
 
 @server.route("/healthz")
 def healthz():
@@ -622,8 +626,7 @@ TABS = dcc.Tabs(
                 (dbc.Col if USE_DBC else html.Div)(id="kpi-un",   **col_kwargs(3)),
                 (dbc.Col if USE_DBC else html.Div)(id="kpi-gdp",  **col_kwargs(3)),
             ], className="g-3 my-1"),
-            # Centered donut
-            html.Div([dcc.Graph(id="people-donut")], style={"maxWidth": "900px", "margin": "0 auto"}),
+            centered(dcc.Graph(id="people-donut"), maxw=900),
             (dbc.Row if USE_DBC else html.Div)([
                 (dbc.Col if USE_DBC else html.Div)([html.H5("Current Situation"), html.Div(id="people-cards")], **col_kwargs(6)),
                 (dbc.Col if USE_DBC else html.Div)([
@@ -650,9 +653,8 @@ TABS = dcc.Tabs(
                     dcc.Dropdown(id="macro-scn", options=scenario_opts_global, value=scenario_opts_global[0]["value"])
                 ], **col_kwargs(3)),
             ], className="g-2"),
-            # Centered macro graph
-            dcc.Graph(id="macro-graph", style={"maxWidth": "1100px", "margin": "0 auto"}),
-            html.Div(id="macro-risk-chip", style={"maxWidth": "1100px", "margin": "6px auto"}),
+            centered(dcc.Graph(id="macro-graph")),
+            centered(html.Div(id="macro-risk-chip"), maxw=1100),
             html.Hr(),
             html.H5("Microeconomic (RSI)"),
             (dbc.Row if USE_DBC else html.Div)([
@@ -665,23 +667,15 @@ TABS = dcc.Tabs(
                     dcc.Dropdown(id="micro-scn", options=scenario_opts_global, value=scenario_opts_global[0]["value"])
                 ], **col_kwargs(3)),
             ], className="g-2"),
-            # Centered micro graph
-            dcc.Graph(id="micro-graph", style={"maxWidth": "1100px", "margin": "0 auto"}),
+            centered(dcc.Graph(id="micro-graph")),
         ]),
 
         dcc.Tab(label="Simulation", value="tab-sim", children=[
             scenario_preset_buttons(),
-            html.Div(id="sim-overall-prob", className="my-2", style={"maxWidth":"1100px","margin":"0 auto"}),
-
-            dcc.Graph(
-                id="sim-donut",
-                style={"maxWidth": "900px", "margin": "0 auto"},
-                config={"displaylogo": False, "responsive": True}
-            ),
-            html.Div(id="sim-analyst-line", className="my-2",
-                     style={"fontWeight":"500", "textAlign":"center", "maxWidth":"1100px","margin":"0 auto"}),
-
-            (dbc.Row if USE_DBC else html.Div)([
+            centered(html.Div(id="sim-overall-prob", className="my-2")),
+            centered(dcc.Graph(id="sim-donut", config={"displaylogo": False, "responsive": True}), maxw=900),
+            centered(html.Div(id="sim-analyst-line", className="my-2", style={"fontWeight":"500", "textAlign":"center"})),
+            centered((dbc.Row if USE_DBC else html.Div)([
                 (dbc.Col if USE_DBC else html.Div)([
                     html.Label("View Micro (RSI)"),
                     dcc.Dropdown(id="sim-micro-var", options=micro_opts, value=micro_opts[0]["value"] if micro_opts else None)
@@ -690,10 +684,8 @@ TABS = dcc.Tabs(
                     html.Label("Scenario"),
                     dcc.Dropdown(id="sim-scn", options=scenario_opts_global, value=scenario_opts_global[0]["value"])
                 ], **col_kwargs(3)),
-            ], className="g-2", style={"maxWidth":"1100px","margin":"0 auto"}),
-
-            # Sliders
-            html.Div(className="sim-green-sliders", children=[
+            ], className="g-2")),
+            centered(html.Div(className="sim-green-sliders", children=[
                 (dbc.Row if USE_DBC else html.Div)([
                     (dbc.Col if USE_DBC else html.Div)([
                         html.Label("Δ Credit Card Growth (%)"),
@@ -725,36 +717,28 @@ TABS = dcc.Tabs(
                                    marks={-50:"-50", -25:"-25", 0:"0", 25:"25", 50:"+50"})
                     ], **col_kwargs(6)),
                 ], className="g-2"),
-            ], style={"maxWidth":"1100px","margin":"0 auto"}),
-
-            html.Div(id="sim-pct-readout", className="mt-1 text-muted", style={"maxWidth":"1100px","margin":"0 auto"}),
-
-            dcc.Graph(id="sim-macro-graph",
-                      style={"height": "1100px", "maxWidth": "1100px", "margin": "0 auto"},
-                      config={"displaylogo": False, "responsive": False}),
-            dcc.Graph(id="sim-micro-graph",
-                      style={"height": "420px", "maxWidth": "1100px", "margin": "0 auto"},
-                      config={"displaylogo": False, "responsive": False}),
-
-            html.Div(id="sim-risk-chips", className="mt-2", style={"maxWidth":"1100px","margin":"0 auto"}),
+            ])),
+            centered(html.Div(id="sim-pct-readout", className="mt-1 text-muted")),
+            centered(dcc.Graph(id="sim-macro-graph", style={"height": "1100px"}, config={"displaylogo": False, "responsive": False})),
+            centered(dcc.Graph(id="sim-micro-graph", style={"height": "420px"}, config={"displaylogo": False, "responsive": False})),
+            centered(html.Div(id="sim-risk-chips", className="mt-2")),
             html.Hr(),
-            html.H5("Simulation Summary", style={"maxWidth":"1100px","margin":"0 auto"}),
-            html.H6("Current values", style={"maxWidth":"1100px","margin":"0 auto"}),
-            html.Div(
+            centered(html.H5("Simulation Summary")),
+            centered(html.H6("Current values")),
+            centered(html.Div(
                 dash_table.DataTable(
                     id="sim-table",
                     columns=[], data=[],
                     style_table={"overflowX": "auto"},
                     style_cell={"padding":"8px","border":"1px solid #eee"},
                     style_header={"backgroundColor":"#f3f4f6","fontWeight":"bold"}
-                ),
-                style={"maxWidth":"1100px","margin":"0 auto"}
-            ),
+                )
+            )),
         ]),
 
         dcc.Tab(label="Risk Overview", value="tab-risk", children=[
-            dcc.Graph(id="risk-counts", style={"maxWidth": "1100px", "margin": "0 auto"}),
-            dcc.Graph(id="risk-table-simple", style={"maxWidth": "1100px", "margin": "0 auto"}),
+            centered(dcc.Graph(id="risk-counts")),
+            centered(dcc.Graph(id="risk-table-simple")),
         ]),
     ],
 )
@@ -1137,8 +1121,6 @@ def cb_sim(micro_var, scn, norm_on, mode, n1, n2, n3, s_ccg, s_cpih, s_un, s_gdp
 
         _add_threshold_lines(macro_fig, dfb, bands, norm_on, row=i)
         add_hist_forecast_divider(macro_fig, dfb, row=i, col=1); add_global_crisis_bands(macro_fig, row=i, col=1)
-
-        # Per-row y-axis titles
         macro_fig.update_yaxes(title_text=y_label_for(var, norm_on), row=i, col=1)
 
         tail = pd.to_numeric(pd.Series(adjF), errors="coerce").dropna().tail(2) if adjF is not None else pd.Series([], dtype=float)
@@ -1263,8 +1245,4 @@ def cb_risk_overview_simple(mode):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8052))
-    # Bind to 0.0.0.0 for Render; disable debug/reloader in prod
     app.run(host="0.0.0.0", port=port, debug=False)
-
-
-
