@@ -53,17 +53,17 @@ SHEET_TO_NAME = {
 }
 
 Y_LABELS = {
-    "CPIH": "Inflation (y/y, %)",
+    "CPIH": "Inflation (%)",
     "Unemployment": "Unemployment rate (%)",
-    "GDP": "Real GDP (q/q, %)",
-    "Yield Spread": "10Y–2Y gilt spread (pp)",
-    "Credit Card Growth": "Credit card growth (y/y, %)",
-    "RSI: Predominantly food stores": "Retail Sales Index (volume, SA; base=100)",
-    "RSI: Clothing & Footwear": "Retail Sales Index (volume, SA; base=100)",
-    "RSI: Household goods": "Retail Sales Index (volume, SA; base=100)",
-    "Non-store Retailing": "Retail Sales Index (volume, SA; base=100)",
-    "RSI: Electrical household appliances": "Retail Sales Index (volume, SA; base=100)",
-    "RSI: Watches & Jewellery": "Retail Sales Index (volume, SA; base=100)",
+    "GDP": "Real GDP (%)",
+    "Yield Spread": "10Y–2Y gilt spread ",
+    "Credit Card Growth": "Credit card growth (%)",
+    "RSI: Predominantly food stores": "RSI(vol, SA; base=100)",
+    "RSI: Clothing & Footwear": "RSI(vol, SA; base=100)",
+    "RSI: Household goods": "RSI(vol, SA; base=100)",
+    "Non-store Retailing": "RSI(vol, SA; base=100)",
+    "RSI: Electrical household appliances": "RSI(vol, SA; base=100)",
+    "RSI: Watches & Jewellery": "RSI(vol, SA; base=100)",
 }
 
 MACROS = ["Credit Card Growth", "CPIH", "Unemployment", "GDP", "Yield Spread"]
@@ -1246,3 +1246,4 @@ def cb_risk_overview_simple(mode):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8052))
     app.run(host="0.0.0.0", port=port, debug=False)
+
