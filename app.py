@@ -52,6 +52,20 @@ SHEET_TO_NAME = {
     "RSI_watches_and_jewellery_": "RSI: Watches & Jewellery",
 }
 
+Y_LABELS = {
+    "CPIH": "Inflation (y/y, %)",
+    "Unemployment": "Unemployment rate (%)",
+    "GDP": "Real GDP (q/q, %)",
+    "Yield Spread": "10Y–2Y gilt spread (pp)",
+    "Credit Card Growth": "Credit card growth (y/y, %)",
+    "RSI: Predominantly food stores": "Retail Sales Index (volume, SA; base=100)",
+    "RSI: Clothing & Footwear": "Retail Sales Index (volume, SA; base=100)",
+    "RSI: Household goods": "Retail Sales Index (volume, SA; base=100)",
+    "Non-store Retailing": "Retail Sales Index (volume, SA; base=100)",
+    "RSI: Electrical household appliances": "Retail Sales Index (volume, SA; base=100)",
+    "RSI: Watches & Jewellery": "Retail Sales Index (volume, SA; base=100)",
+}
+
 MACROS = ["Credit Card Growth", "CPIH", "Unemployment", "GDP", "Yield Spread"]
 MICROS = [
     "RSI: Predominantly food stores", "RSI: Clothing & Footwear",
@@ -1222,6 +1236,7 @@ def cb_risk_overview_simple(mode):
 
 if __name__ == "__main__":
     app.run(debug=True, port=int(os.environ.get("PORT", 8052)))
+
 
 
 
